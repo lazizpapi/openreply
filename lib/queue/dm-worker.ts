@@ -6,12 +6,15 @@ import {
 } from "@/lib/instagram/delivery-errors";
 import { claimCommentDelivery, MAX_COMMENT_SEND_ATTEMPTS } from "./comment-delivery";
 import { sendNudge } from "./nudge";
+import { handleAiMessage, processAiReply } from "@/lib/ai/assistant";
 import { clearPendingButton } from "@/lib/instagram/bot-sends";
 import { createHash } from "node:crypto";
 import { UnrecoverableError, Worker, type Job } from "bullmq";
 import {
   getDMQueue,
   getRedisConnection,
+  AI_REPLY_JOB_NAME,
+  type AiReplyJob,
   MESSAGE_JOB_NAME,
   POSTBACK_JOB_NAME,
   FOLLOWUP_JOB_NAME,
@@ -1548,11 +1551,13 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   // A campaign keyword always wins; only an unmatched DM can be a nudge.
   if (campaignMatched) return;
   if (await sendNudge(job.data)) return;
-  // Hook point: the AI assistant answers here, when no campaign matched and no
-  // nudge was sent.
+  await handleAiMessage(job.data, new Date(job.timestamp || Date.now()));
 }
 
 async function dispatchJob(job: Job<DmQueueJob>): Promise<void> {
+  if (job.name === AI_REPLY_JOB_NAME) {
+    return processAiReply(job.data as AiReplyJob);
+  }
   if (job.name === POSTBACK_JOB_NAME) {
     return processPostback(job as Job<ProcessPostbackJob>);
   }
@@ -1562,7 +1567,10 @@ async function dispatchJob(job: Job<DmQueueJob>): Promise<void> {
   if (job.name === MESSAGE_JOB_NAME) {
     return processMessage(job as Job<ProcessMessageJob>);
   }
-  return processComment(job as Job<ProcessCommentJob>);
+  if (job.name === "process-comment") {
+    return processComment(job as Job<ProcessCommentJob>);
+  }
+  console.warn(`[DM Worker] Job ${job.id} has unknown name ${job.name}; skipped`);
 }
 
 async function processJob(job: Job<DmQueueJob>): Promise<void> {

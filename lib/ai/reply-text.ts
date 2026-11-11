@@ -2,6 +2,20 @@
  * Pure text shaping for AI replies: Markdown stripping, the bot notice, and
  * splitting to Instagram's per-message limit.
  */
+import type { AiLanguage } from "./provider";
+
+const BOT_NOTICES: Record<AiLanguage, string> = {
+  "uz-latn": "🤖 Bu avtomatik yordamchi.",
+  "uz-cyrl": "🤖 Бу автоматик ёрдамчи.",
+  ru: "🤖 Это автоматический ассистент.",
+  en: "🤖 This is an automated assistant.",
+  other: "🤖 Bu avtomatik yordamchi.",
+};
+
+/** The bot notice in the follower's language; Uzbek Latin when unknown. */
+export function botNotice(language: AiLanguage | undefined): string {
+  return BOT_NOTICES[language ?? "other"] ?? BOT_NOTICES["uz-latn"];
+}
 
 const MAX_BYTES = 1000;
 const MAX_PARTS = 3;

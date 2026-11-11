@@ -16,8 +16,17 @@ const {
   mockQueueAdd,
   mockReserveWorkspaceDMSend,
   mockReleaseWorkspaceDMReservation,
+  mockAskClaude,
 } = vi.hoisted(() => ({
   mockPrisma: {
+    // In-memory AiMessage table; see createAiMessageTable below.
+    aiMessage: {
+      createMany: vi.fn(),
+      create: vi.fn(),
+      findMany: vi.fn(),
+      count: vi.fn(),
+      deleteMany: vi.fn(),
+    },
     zernioConnection: { findUnique: vi.fn() },
     postbackDelivery: { create: vi.fn(), delete: vi.fn() },
     automation: {
@@ -53,6 +62,13 @@ const {
   mockQueueAdd: vi.fn(),
   mockReserveWorkspaceDMSend: vi.fn(),
   mockReleaseWorkspaceDMReservation: vi.fn(),
+  mockAskClaude: vi.fn(),
+}));
+
+// The Claude call is mocked at the AI provider boundary; the prompt builder is real.
+vi.mock("@/lib/ai/provider", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ai/provider")>()),
+  askClaude: mockAskClaude,
 }));
 
 vi.mock("@/lib/db/client", () => ({
@@ -119,6 +135,7 @@ vi.mock("@/lib/queue/client", () => ({
   POSTBACK_JOB_NAME: "process-postback",
   FOLLOWUP_JOB_NAME: "process-followup",
   MESSAGE_JOB_NAME: "process-message",
+  AI_REPLY_JOB_NAME: "ai-reply",
 }));
 
 vi.mock("bullmq", () => {
@@ -199,6 +216,7 @@ function getProcessor(): (job: {
 
 function createMockJob(data: Record<string, unknown> = mockJobData) {
   return {
+    name: "process-comment",
     data,
     id: "job_001",
     attemptsMade: 0,
@@ -2049,4 +2067,146 @@ it("retains the public reply claim if sending succeeded but its log write failed
   await process({ ...createMockJob(), id: "next-poll" });
   expect(sendCommentReply).toHaveBeenCalledTimes(1);
   expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+});
+
+type AiRow = {
+  id: string;
+  instagramAccountId: string;
+  followerId: string;
+  role: "USER" | "ASSISTANT";
+  text: string;
+  messageId: string | null;
+  createdAt: Date;
+};
+type AiWhere = Partial<Pick<AiRow, "instagramAccountId" | "followerId" | "role">> & {
+  createdAt?: { gte?: Date; lt?: Date };
+};
+
+// A tiny in-memory AiMessage table behind the mocked Prisma delegate.
+function useAiMessageTable() {
+  const rows: AiRow[] = [];
+  const matches = (row: AiRow, where: AiWhere = {}) =>
+    (where.instagramAccountId === undefined || row.instagramAccountId === where.instagramAccountId) &&
+    (where.followerId === undefined || row.followerId === where.followerId) &&
+    (where.role === undefined || row.role === where.role) &&
+    (!where.createdAt?.gte || row.createdAt >= where.createdAt.gte) &&
+    (!where.createdAt?.lt || row.createdAt < where.createdAt.lt);
+  const insert = (data: Partial<AiRow>) => {
+    const row = { id: `ai_${rows.length + 1}`, messageId: null, createdAt: new Date(), ...data } as AiRow;
+    rows.push(row);
+    return row;
+  };
+  const table = mockPrisma.aiMessage;
+  table.createMany.mockImplementation(async ({ data }: { data: Partial<AiRow>[] }) => ({
+    count: data
+      .filter((row) => !rows.some((existing) => row.messageId && existing.messageId === row.messageId))
+      .map(insert).length,
+  }));
+  table.create.mockImplementation(async ({ data }: { data: Partial<AiRow> }) => insert(data));
+  table.findMany.mockImplementation(async ({ where, take }: { where: AiWhere; take?: number }) =>
+    rows
+      .filter((row) => matches(row, where))
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || rows.indexOf(b) - rows.indexOf(a))
+      .slice(0, take)
+  );
+  table.count.mockImplementation(
+    async ({ where }: { where: AiWhere }) => rows.filter((row) => matches(row, where)).length
+  );
+  table.deleteMany.mockImplementation(async ({ where }: { where: AiWhere }) => {
+    const gone = rows.filter((row) => matches(row, where));
+    for (const row of gone) rows.splice(rows.indexOf(row), 1);
+    return { count: gone.length };
+  });
+  return rows;
+}
+
+describe("DM Worker — AI assistant", () => {
+  const instructions = "Men Lazizbek, AI haqida kontent qilaman. Telegram: https://t.me/lazizpapi";
+  const account = {
+    id: "ig_account_row_1",
+    instagramId: "ig_456",
+    provider: "META",
+    workspaceId: "workspace_123",
+    zernioAccountId: null,
+    accessToken: "encrypted_token_abc",
+    aiSettings: { enabled: true, instructions, dailyLimit: 100 },
+  };
+  const campaign = {
+    ...mockAutomation,
+    name: "AI qo'llanma",
+    dmTriggerEnabled: true,
+    requireFollow: false,
+  };
+  const answer = (reply: string, language = "uz-latn", handover = false) => ({
+    reply,
+    handover,
+    language,
+  });
+  let aiRows: AiRow[];
+
+  function dm(text: string, mid: string, senderId = "follower_1") {
+    return {
+      name: "process-message",
+      data: { instagramAccountId: "ig_456", messageId: mid, messageText: text, senderId },
+      id: `message_job_${mid}`,
+      attemptsMade: 0,
+    };
+  }
+
+  // Runs the ai-reply jobs queued so far, after their 10-second delay.
+  async function runAiReplies() {
+    const jobs = mockQueueAdd.mock.calls.filter(([name]) => name === "ai-reply");
+    mockQueueAdd.mockClear();
+    vi.setSystemTime(Date.now() + 10_000);
+    for (const [name, data, options] of jobs) {
+      await getProcessor()({ name, data, id: options.jobId, attemptsMade: 0 });
+    }
+  }
+
+  const sentTexts = () => mockSendDirectMessage.mock.calls.map((call) => call[3]);
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-11T10:00:00Z"));
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
+    aiRows = useAiMessageTable();
+    mockPrisma.instagramAccount.findUnique.mockResolvedValue(account);
+    mockPrisma.automation.findMany.mockResolvedValue([campaign]);
+    mockMatchKeywords.mockReturnValue({ matched: false, matchedKeyword: null });
+    mockAskClaude.mockResolvedValue(answer("Qo'llanma uchun LINK deb yozing."));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  it("answers a DM that matched no campaign 10 seconds later, from the AI instructions and live campaigns", async () => {
+    await getProcessor()(dm("qo'llanma qayerda?", "mid_1"));
+
+    expect(mockQueueAdd).toHaveBeenCalledWith(
+      "ai-reply",
+      expect.anything(),
+      expect.objectContaining({
+        delay: 10_000,
+        attempts: 1,
+        jobId: expect.stringContaining(Buffer.from("mid_1").toString("base64url")),
+      })
+    );
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+
+    await runAiReplies();
+
+    expect(mockSendDirectMessage).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "follower_1",
+      "🤖 Bu avtomatik yordamchi.\nQo'llanma uchun LINK deb yozing."
+    );
+    const [system, messages] = mockAskClaude.mock.calls[0];
+    expect(system).toContain(instructions);
+    expect(system).toContain("AI qo'llanma: type LINK or PRICE here to get it.");
+    expect(system).toContain("approved an exception");
+    expect(messages).toEqual([{ role: "user", content: "qo'llanma qayerda?" }]);
+  });
 });
