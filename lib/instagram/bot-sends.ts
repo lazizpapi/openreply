@@ -1,5 +1,6 @@
 /**
- * Redis records of what the bot sent, shared by the nudge and human takeover.
+ * Redis records of what the bot sent, shared by the nudge and human takeover,
+ * plus the AI pause that human takeover sets.
  * All best-effort: skipped without REDIS_URL (tests), and a write never delays
  * or fails the send it follows.
  */
@@ -70,6 +71,22 @@ export async function getPendingButton(
 ): Promise<PendingButton | null> {
   const raw = await redis()?.get(pendingKey(instagramAccountId, followerId));
   return raw ? (JSON.parse(raw) as PendingButton) : null;
+}
+
+export async function isBotSend(messageId: string) {
+  return Boolean(await redis()?.get(`bot_sent:${messageId}`));
+}
+
+// Human takeover: the AI assistant stays silent in this chat for 12 hours.
+const pauseKey = (instagramAccountId: string, followerId: string) =>
+  `ai_pause:${instagramAccountId}:${followerId}`;
+
+export function pauseAi(instagramAccountId: string, followerId: string) {
+  write((client) => client.set(pauseKey(instagramAccountId, followerId), "1", "EX", 12 * 60 * 60));
+}
+
+export async function isAiPaused(instagramAccountId: string, followerId: string) {
+  return Boolean(await redis()?.get(pauseKey(instagramAccountId, followerId)));
 }
 
 // True for the first nudge to this follower in 60 seconds.

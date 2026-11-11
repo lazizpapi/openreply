@@ -6,6 +6,7 @@ const {
   mockSendPrivateReplyWithLinkButton,
   mockSendPrivateReplyWithButton,
   mockGetUserFollowStatus,
+  mockGetBusinessFollowsUser,
   mockSendDirectMessageWithButton,
   mockSendDirectMessage,
   mockSendDirectMessageWithLinkButton,
@@ -52,6 +53,7 @@ const {
   mockSendPrivateReplyWithLinkButton: vi.fn(),
   mockSendPrivateReplyWithButton: vi.fn(),
   mockGetUserFollowStatus: vi.fn(),
+  mockGetBusinessFollowsUser: vi.fn(),
   mockSendDirectMessageWithButton: vi.fn(),
   mockSendDirectMessage: vi.fn(),
   mockSendDirectMessageWithLinkButton: vi.fn(),
@@ -80,6 +82,7 @@ vi.mock("@/lib/meta/client", () => ({
   sendPrivateReplyWithLinkButton: mockSendPrivateReplyWithLinkButton,
   sendPrivateReplyWithButton: mockSendPrivateReplyWithButton,
   getUserFollowStatus: mockGetUserFollowStatus,
+  getBusinessFollowsUser: mockGetBusinessFollowsUser,
   sendDirectMessageWithButton: mockSendDirectMessageWithButton,
   sendDirectMessage: mockSendDirectMessage,
   sendDirectMessageWithLinkButton: mockSendDirectMessageWithLinkButton,
@@ -136,6 +139,7 @@ vi.mock("@/lib/queue/client", () => ({
   FOLLOWUP_JOB_NAME: "process-followup",
   MESSAGE_JOB_NAME: "process-message",
   AI_REPLY_JOB_NAME: "ai-reply",
+  AI_ECHO_JOB_NAME: "ai-echo",
 }));
 
 vi.mock("bullmq", () => {
@@ -308,6 +312,7 @@ beforeEach(() => {
     message_id: "msg_006",
   });
   mockGetUserFollowStatus.mockResolvedValue(true);
+  mockGetBusinessFollowsUser.mockResolvedValue(false);
 });
 
 describe("DM Worker — comments left on an ad", () => {
@@ -2504,9 +2509,97 @@ describe("DM Worker — AI assistant", () => {
   });
 
   it("never hands a job with an unknown name to the comment handler", async () => {
-    await getProcessor()({ name: "ai-echo", data: mockJobData, id: "echo_job", attemptsMade: 0 });
+    await getProcessor()({ name: "ai-unknown", data: mockJobData, id: "unknown_job", attemptsMade: 0 });
 
     expect(mockPrisma.automation.findMany).not.toHaveBeenCalled();
     expect(mockSendPrivateReply).not.toHaveBeenCalled();
+  });
+
+  describe("human takeover", () => {
+    const HOUR_MS = 60 * 60 * 1000;
+
+    // The echo of a message the account sent, 15 seconds after it was sent.
+    function echo(messageId: string, isTemplate = false) {
+      return {
+        name: "ai-echo",
+        data: { instagramAccountId: "ig_456", followerId: "follower_1", messageId, isTemplate },
+        id: `ai_echo_${messageId}`,
+        attemptsMade: 0,
+      };
+    }
+
+    async function followerWrites(text: string, mid: string) {
+      await getProcessor()(dm(text, mid));
+      await runAiReplies();
+    }
+
+    beforeEach(() => {
+      vi.stubEnv("REDIS_URL", "redis://fake");
+      vi.mocked(getRedisConnection).mockReturnValue(createFakeRedis() as never);
+    });
+
+    it("stays silent in the chat for 12 hours after the owner replies from the Instagram app", async () => {
+      await getProcessor()(echo("mid_owner"));
+
+      await followerWrites("salom", "mid_1");
+      vi.setSystemTime(Date.now() + 11 * HOUR_MS);
+      await followerWrites("javob bering", "mid_2");
+      expect(mockAskClaude).not.toHaveBeenCalled();
+      expect(mockSendDirectMessage).not.toHaveBeenCalled();
+
+      vi.setSystemTime(Date.now() + HOUR_MS);
+      await followerWrites("hali ham kutyapman", "mid_3");
+      expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not count its own answers as the owner replying", async () => {
+      mockSendDirectMessage.mockResolvedValue({ recipient_id: "follower_1", message_id: "mid_ai" });
+
+      await followerWrites("salom", "mid_1");
+      await getProcessor()(echo("mid_ai"));
+      await followerWrites("rahmat", "mid_2");
+
+      expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not count a campaign message as the owner replying", async () => {
+      mockMatchKeywords.mockReturnValueOnce({ matched: true, matchedKeyword: "LINK" });
+      mockSendDirectMessage.mockResolvedValueOnce({ recipient_id: "follower_1", message_id: "mid_campaign" });
+
+      await followerWrites("LINK", "mid_1");
+      await getProcessor()(echo("mid_campaign"));
+      await followerWrites("rahmat", "mid_2");
+
+      expect(mockAskClaude).toHaveBeenCalledTimes(1);
+      expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not count a template or button message as the owner replying", async () => {
+      await getProcessor()(echo("mid_template_unrecorded", true));
+      await followerWrites("salom", "mid_1");
+
+      expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("never answers a follower the owner follows", async () => {
+    mockGetBusinessFollowsUser.mockImplementation(
+      async (_token: string, followerId: string) => followerId === "follower_1"
+    );
+
+    await getProcessor()(dm("salom", "mid_1", "follower_1"));
+    await getProcessor()(dm("salom", "mid_2", "follower_2"));
+    await runAiReplies();
+
+    expect(mockSendDirectMessage.mock.calls.map((call) => call[2])).toEqual(["follower_2"]);
+  });
+
+  it.each([false, null])("answers when Meta reports the owner's follow as %s", async (follows) => {
+    mockGetBusinessFollowsUser.mockResolvedValue(follows);
+
+    await getProcessor()(dm("salom", "mid_1"));
+    await runAiReplies();
+
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
   });
 });

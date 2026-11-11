@@ -7,10 +7,17 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { AiMessage } from "@/app/generated/prisma/client";
 import { prisma } from "@/lib/db/client";
-import { createInstagramContext, sendDirectMessage } from "@/lib/instagram/provider";
+import { isAiPaused, isBotSend, pauseAi } from "@/lib/instagram/bot-sends";
+import {
+  createInstagramContext,
+  getBusinessFollowsUser,
+  sendDirectMessage,
+  type InstagramContext,
+} from "@/lib/instagram/provider";
 import {
   AI_REPLY_JOB_NAME,
   getDMQueue,
+  type AiEchoJob,
   type AiReplyJob,
   type ProcessMessageJob,
 } from "@/lib/queue/client";
@@ -110,12 +117,16 @@ async function skipReason(
   instagramAccountId: string,
   dailyLimit: number,
   chat: AiMessage[],
+  context: InstagramContext,
   now: Date
 ): Promise<string | null> {
   const latest = chat[0];
   if (latest?.role === "ASSISTANT") return "already answered";
   if (latest?.messageId !== job.messageId) return "a newer message gets the answer";
-  // Ticket 06: the AI pause and owner-follows checks go here.
+  if (await isAiPaused(job.instagramAccountId, job.followerId)) return "paused: the owner replied";
+  // Unknown (null) means not followed.
+  if ((await getBusinessFollowsUser({ context, recipientId: job.followerId })) === true)
+    return "the owner follows this follower";
   if (now.getTime() - latest.createdAt.getTime() > DAY_MS) return "messaging window closed";
   if ((await countAiAnswersToday(instagramAccountId, now)) >= dailyLimit)
     return "daily AI limit reached";
@@ -144,7 +155,8 @@ export async function processAiReply(job: AiReplyJob): Promise<void> {
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: HISTORY_SIZE,
     });
-    const skip = await skipReason(job, account.id, settings.dailyLimit, chat, now);
+    const context = await createInstagramContext(account);
+    const skip = await skipReason(job, account.id, settings.dailyLimit, chat, context, now);
     if (skip) {
       log(`No answer to ${job.messageId}: ${skip}`);
       return;
@@ -170,7 +182,6 @@ export async function processAiReply(job: AiReplyJob): Promise<void> {
       where: { instagramAccountId: account.id, followerId: job.followerId, role: "ASSISTANT" },
     });
     const parts = splitReply(answeredBefore ? reply : `${botNotice(answer.language)}\n${reply}`);
-    const context = await createInstagramContext(account);
     let sent = 0;
     for (const message of parts) {
       try {
@@ -201,6 +212,21 @@ export async function processAiReply(job: AiReplyJob): Promise<void> {
     });
   } catch (error) {
     log(`Answer to ${job.messageId} failed:`, error);
+  }
+}
+
+/**
+ * The `ai-echo` job: the echo of a DM the account sent, run 15 seconds later so
+ * the bot-send record exists. Anything the bot did not send is the owner
+ * replying from the Instagram app, which pauses the AI for that follower.
+ */
+export async function processAiEcho(job: AiEchoJob): Promise<void> {
+  try {
+    if (job.isTemplate || (await isBotSend(job.messageId))) return;
+    pauseAi(job.instagramAccountId, job.followerId);
+    log(`Owner replied to ${job.followerId}: paused for 12 hours`);
+  } catch (error) {
+    log(`Echo ${job.messageId} not handled:`, error);
   }
 }
 

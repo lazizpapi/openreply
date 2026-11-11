@@ -85,17 +85,29 @@ export interface AiReplyJob {
   messageId: string;
 }
 
+// The echo of a DM the account sent (META only). Unless the bot sent it, the
+// owner replied personally and the AI assistant pauses for that follower.
+export interface AiEchoJob {
+  accountConnectionId?: string;
+  instagramAccountId: string;
+  followerId: string;
+  messageId: string;
+  isTemplate: boolean;
+}
+
 export type DmQueueJob =
   | ProcessCommentJob
   | ProcessPostbackJob
   | ProcessFollowUpJob
   | ProcessMessageJob
-  | AiReplyJob;
+  | AiReplyJob
+  | AiEchoJob;
 
 export const POSTBACK_JOB_NAME = "process-postback";
 export const FOLLOWUP_JOB_NAME = "process-followup";
 export const MESSAGE_JOB_NAME = "process-message";
 export const AI_REPLY_JOB_NAME = "ai-reply";
+export const AI_ECHO_JOB_NAME = "ai-echo";
 
 let dmQueue: Queue<DmQueueJob> | null = null;
 
