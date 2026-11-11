@@ -16,8 +16,17 @@ const {
   mockQueueAdd,
   mockReserveWorkspaceDMSend,
   mockReleaseWorkspaceDMReservation,
+  mockAskClaude,
 } = vi.hoisted(() => ({
   mockPrisma: {
+    // In-memory AiMessage table; see createAiMessageTable below.
+    aiMessage: {
+      createMany: vi.fn(),
+      create: vi.fn(),
+      findMany: vi.fn(),
+      count: vi.fn(),
+      deleteMany: vi.fn(),
+    },
     zernioConnection: { findUnique: vi.fn() },
     postbackDelivery: { create: vi.fn(), delete: vi.fn() },
     automation: {
@@ -53,6 +62,13 @@ const {
   mockQueueAdd: vi.fn(),
   mockReserveWorkspaceDMSend: vi.fn(),
   mockReleaseWorkspaceDMReservation: vi.fn(),
+  mockAskClaude: vi.fn(),
+}));
+
+// The Claude call is mocked at the AI provider boundary; the prompt builder is real.
+vi.mock("@/lib/ai/provider", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ai/provider")>()),
+  askClaude: mockAskClaude,
 }));
 
 vi.mock("@/lib/db/client", () => ({
@@ -119,6 +135,7 @@ vi.mock("@/lib/queue/client", () => ({
   POSTBACK_JOB_NAME: "process-postback",
   FOLLOWUP_JOB_NAME: "process-followup",
   MESSAGE_JOB_NAME: "process-message",
+  AI_REPLY_JOB_NAME: "ai-reply",
 }));
 
 vi.mock("bullmq", () => {
@@ -139,6 +156,7 @@ vi.mock("bullmq", () => {
 
 import { MetaApiError, RateLimitError } from "@/lib/meta/client";
 import { createDMWorker } from "../lib/queue/dm-worker";
+import { deleteExpiredAiMessages } from "@/lib/ai/assistant";
 import { getRedisConnection } from "@/lib/queue/client";
 import { hashRecipientId } from "@/lib/tracking/server";
 
@@ -199,6 +217,7 @@ function getProcessor(): (job: {
 
 function createMockJob(data: Record<string, unknown> = mockJobData) {
   return {
+    name: "process-comment",
     data,
     id: "job_001",
     attemptsMade: 0,
@@ -2049,4 +2068,445 @@ it("retains the public reply claim if sending succeeded but its log write failed
   await process({ ...createMockJob(), id: "next-poll" });
   expect(sendCommentReply).toHaveBeenCalledTimes(1);
   expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+});
+
+type AiRow = {
+  id: string;
+  instagramAccountId: string;
+  followerId: string;
+  role: "USER" | "ASSISTANT";
+  text: string;
+  messageId: string | null;
+  createdAt: Date;
+};
+type AiWhere = Partial<Pick<AiRow, "instagramAccountId" | "followerId" | "role">> & {
+  createdAt?: { gte?: Date; lt?: Date };
+};
+
+// A tiny in-memory AiMessage table behind the mocked Prisma delegate.
+function useAiMessageTable() {
+  const rows: AiRow[] = [];
+  const matches = (row: AiRow, where: AiWhere = {}) =>
+    (where.instagramAccountId === undefined || row.instagramAccountId === where.instagramAccountId) &&
+    (where.followerId === undefined || row.followerId === where.followerId) &&
+    (where.role === undefined || row.role === where.role) &&
+    (!where.createdAt?.gte || row.createdAt >= where.createdAt.gte) &&
+    (!where.createdAt?.lt || row.createdAt < where.createdAt.lt);
+  const insert = (data: Partial<AiRow>) => {
+    const row = { id: `ai_${rows.length + 1}`, messageId: null, createdAt: new Date(), ...data } as AiRow;
+    rows.push(row);
+    return row;
+  };
+  const table = mockPrisma.aiMessage;
+  table.createMany.mockImplementation(async ({ data }: { data: Partial<AiRow>[] }) => ({
+    count: data
+      .filter((row) => !rows.some((existing) => row.messageId && existing.messageId === row.messageId))
+      .map(insert).length,
+  }));
+  table.create.mockImplementation(async ({ data }: { data: Partial<AiRow> }) => insert(data));
+  table.findMany.mockImplementation(async ({ where, take }: { where: AiWhere; take?: number }) =>
+    rows
+      .filter((row) => matches(row, where))
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || rows.indexOf(b) - rows.indexOf(a))
+      .slice(0, take)
+  );
+  table.count.mockImplementation(
+    async ({ where }: { where: AiWhere }) => rows.filter((row) => matches(row, where)).length
+  );
+  table.deleteMany.mockImplementation(async ({ where }: { where: AiWhere }) => {
+    const gone = rows.filter((row) => matches(row, where));
+    for (const row of gone) rows.splice(rows.indexOf(row), 1);
+    return { count: gone.length };
+  });
+  return rows;
+}
+
+describe("DM Worker — AI assistant", () => {
+  const instructions = "Men Lazizbek, AI haqida kontent qilaman. Telegram: https://t.me/lazizpapi";
+  const account = {
+    id: "ig_account_row_1",
+    instagramId: "ig_456",
+    provider: "META",
+    workspaceId: "workspace_123",
+    zernioAccountId: null,
+    accessToken: "encrypted_token_abc",
+    aiSettings: { enabled: true, instructions, dailyLimit: 100 },
+  };
+  const campaign = {
+    ...mockAutomation,
+    name: "AI qo'llanma",
+    dmTriggerEnabled: true,
+    requireFollow: false,
+  };
+  const answer = (reply: string, language = "uz-latn", handover = false) => ({
+    reply,
+    handover,
+    language,
+  });
+  let aiRows: AiRow[];
+
+  function dm(text: string, mid: string, senderId = "follower_1") {
+    return {
+      name: "process-message",
+      data: { instagramAccountId: "ig_456", messageId: mid, messageText: text, senderId },
+      id: `message_job_${mid}`,
+      attemptsMade: 0,
+    };
+  }
+
+  // Runs the ai-reply jobs queued so far, after their 10-second delay.
+  async function runAiReplies() {
+    const jobs = mockQueueAdd.mock.calls.filter(([name]) => name === "ai-reply");
+    mockQueueAdd.mockClear();
+    vi.setSystemTime(Date.now() + 10_000);
+    for (const [name, data, options] of jobs) {
+      await getProcessor()({ name, data, id: options.jobId, attemptsMade: 0 });
+    }
+  }
+
+  const sentTexts = () => mockSendDirectMessage.mock.calls.map((call) => call[3]);
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-11T10:00:00Z"));
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
+    aiRows = useAiMessageTable();
+    mockPrisma.instagramAccount.findUnique.mockResolvedValue(account);
+    mockPrisma.automation.findMany.mockResolvedValue([campaign]);
+    mockMatchKeywords.mockReturnValue({ matched: false, matchedKeyword: null });
+    mockAskClaude.mockResolvedValue(answer("Qo'llanma uchun LINK deb yozing."));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  it("answers a DM that matched no campaign 10 seconds later, from the AI instructions and live campaigns", async () => {
+    await getProcessor()(dm("qo'llanma qayerda?", "mid_1"));
+
+    expect(mockQueueAdd).toHaveBeenCalledWith(
+      "ai-reply",
+      expect.anything(),
+      expect.objectContaining({
+        delay: 10_000,
+        attempts: 1,
+        jobId: expect.stringContaining(Buffer.from("mid_1").toString("base64url")),
+      })
+    );
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+
+    await runAiReplies();
+
+    expect(mockSendDirectMessage).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "follower_1",
+      "🤖 Bu avtomatik yordamchi.\nQo'llanma uchun LINK deb yozing."
+    );
+    const [system, messages] = mockAskClaude.mock.calls[0];
+    expect(system).toContain(instructions);
+    expect(system).toContain("AI qo'llanma: type LINK or PRICE here to get it.");
+    expect(system).toContain("approved an exception");
+    expect(messages).toEqual([{ role: "user", content: "qo'llanma qayerda?" }]);
+  });
+
+  it("lets a matching campaign answer instead of the AI", async () => {
+    mockMatchKeywords.mockReturnValue({ matched: true, matchedKeyword: "LINK" });
+
+    await getProcessor()(dm("LINK", "mid_1"));
+    await runAiReplies();
+
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sentTexts()[0]).toContain("Here is the link");
+    expect(mockAskClaude).not.toHaveBeenCalled();
+    expect(aiRows).toHaveLength(0);
+  });
+
+  it("lets a nudge answer a yes-word instead of the AI", async () => {
+    const redis = createFakeRedis();
+    vi.stubEnv("REDIS_URL", "redis://fake");
+    vi.mocked(getRedisConnection).mockReturnValue(redis as never);
+    redis.store.set("pending_button:ig_456:follower_1", {
+      value: JSON.stringify({
+        campaignId: "auto_789",
+        text: "Tap below",
+        buttonTitle: "Send it",
+        payload: "reveal:auto_789:open",
+        via: "dm",
+      }),
+      expiresAt: Date.now() + 60_000,
+    });
+    mockPrisma.automation.findFirst.mockResolvedValue(campaign);
+
+    await getProcessor()(dm("ha", "mid_1"));
+    await runAiReplies();
+
+    expect(mockSendDirectMessageWithButton).toHaveBeenCalledTimes(1);
+    expect(mockAskClaude).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("answers a yes-word when there is no pending button", async () => {
+    await getProcessor()(dm("ha", "mid_1"));
+    await runAiReplies();
+
+    expect(mockAskClaude).toHaveBeenCalledTimes(1);
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing AI-related without ANTHROPIC_API_KEY", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+
+    await getProcessor()(dm("salom", "mid_1"));
+    await getProcessor()({
+      name: "ai-reply",
+      data: { instagramAccountId: "ig_456", followerId: "follower_1", messageId: "mid_1" },
+      id: "ai_reply_job",
+      attemptsMade: 0,
+    });
+
+    expect(mockPrisma.aiMessage.createMany).not.toHaveBeenCalled();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+    expect(mockAskClaude).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["the AI settings are off", { ...account, aiSettings: { ...account.aiSettings, enabled: false } }],
+    ["the account has no AI settings", { ...account, aiSettings: null }],
+    ["the account is a Zernio account", { ...account, provider: "ZERNIO" }],
+  ])("stays out of the chat when %s", async (_case, setup) => {
+    mockPrisma.instagramAccount.findUnique.mockResolvedValue(setup);
+
+    await getProcessor()(dm("salom", "mid_1"));
+    await runAiReplies();
+
+    expect(aiRows).toHaveLength(0);
+    expect(mockAskClaude).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("answers only the last of several messages, with all of them", async () => {
+    await getProcessor()(dm("salom", "mid_1"));
+    vi.setSystemTime(Date.now() + 3_000);
+    await getProcessor()(dm("savolim bor", "mid_2"));
+    vi.setSystemTime(Date.now() + 3_000);
+    await getProcessor()(dm("qo'llanma qayerda?", "mid_3"));
+
+    await runAiReplies();
+
+    expect(mockAskClaude).toHaveBeenCalledTimes(1);
+    expect(mockAskClaude.mock.calls[0][1]).toEqual([
+      { role: "user", content: "salom" },
+      { role: "user", content: "savolim bor" },
+      { role: "user", content: "qo'llanma qayerda?" },
+    ]);
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a duplicate webhook for the same message as a no-op", async () => {
+    await getProcessor()(dm("salom", "mid_1"));
+    await getProcessor()(dm("salom", "mid_1"));
+
+    expect(aiRows).toHaveLength(1);
+    expect(mockQueueAdd).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers a message once even when its job runs twice", async () => {
+    await getProcessor()(dm("salom", "mid_1"));
+    const [[name, data, options]] = mockQueueAdd.mock.calls;
+    vi.setSystemTime(Date.now() + 10_000);
+    const job = { name, data, id: options.jobId, attemptsMade: 0 };
+
+    await getProcessor()(job);
+    await getProcessor()(job);
+
+    expect(mockAskClaude).toHaveBeenCalledTimes(1);
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers a DM that arrives while Claude is answering the previous one", async () => {
+    await getProcessor()(dm("salom", "mid_1"));
+    mockAskClaude.mockImplementationOnce(async () => {
+      vi.setSystemTime(Date.now() + 2_000);
+      await getProcessor()(dm("narxi qancha?", "mid_2"));
+      return answer("Salom!");
+    });
+
+    await runAiReplies(); // answers mid_1, queues mid_2
+    await runAiReplies(); // answers mid_2
+
+    expect(mockAskClaude).toHaveBeenCalledTimes(2);
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("stays silent once the messaging window has closed", async () => {
+    await getProcessor()(dm("salom", "mid_1"));
+    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000); // the worker was down for a day
+
+    await runAiReplies();
+
+    expect(mockAskClaude).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("stays silent at the daily AI limit, counting one answer once however many parts it had", async () => {
+    mockPrisma.instagramAccount.findUnique.mockResolvedValue({
+      ...account,
+      aiSettings: { ...account.aiSettings, dailyLimit: 2 },
+    });
+    mockAskClaude.mockResolvedValue(answer(Array(150).fill("Bu javob.").join(" "))); // 2 parts
+
+    for (const follower of ["follower_1", "follower_2", "follower_3"]) {
+      await getProcessor()(dm("salom", `mid_${follower}`, follower));
+      await runAiReplies();
+    }
+
+    expect(mockSendDirectMessage.mock.calls.map((call) => call[2])).toEqual([
+      "follower_1",
+      "follower_1",
+      "follower_2",
+      "follower_2",
+    ]);
+  });
+
+  it("starts the daily AI limit's day at 00:00 Tashkent time", async () => {
+    mockPrisma.instagramAccount.findUnique.mockResolvedValue({
+      ...account,
+      aiSettings: { ...account.aiSettings, dailyLimit: 1 },
+    });
+    const answerAt = async (utc: string, follower: string) => {
+      vi.setSystemTime(new Date(utc));
+      await getProcessor()(dm("salom", `mid_${follower}`, follower));
+      await runAiReplies();
+    };
+
+    await answerAt("2026-11-11T18:58:00Z", "follower_1"); // 23:58 in Tashkent
+    await answerAt("2026-11-11T18:59:00Z", "follower_2"); // 23:59, same day: limit reached
+    await answerAt("2026-11-11T19:00:00Z", "follower_3"); // 00:00:10 the next day
+
+    expect(mockSendDirectMessage.mock.calls.map((call) => call[2])).toEqual([
+      "follower_1",
+      "follower_3",
+    ]);
+  });
+
+  it("starts the first answer in 30 days with the bot notice in the follower's language", async () => {
+    mockAskClaude.mockResolvedValue(answer("Здравствуйте!", "ru"));
+    const reply = async (text: string, mid: string) => {
+      await getProcessor()(dm(text, mid));
+      await runAiReplies();
+    };
+
+    await reply("привет", "mid_1");
+    vi.setSystemTime(Date.now() + 60_000);
+    await reply("как дела?", "mid_2");
+    vi.setSystemTime(Date.now() + 31 * 24 * 60 * 60 * 1000);
+    await deleteExpiredAiMessages(); // the worker's periodic loop
+    await reply("снова привет", "mid_3");
+
+    expect(sentTexts()).toEqual([
+      "🤖 Это автоматический ассистент.\nЗдравствуйте!",
+      "Здравствуйте!",
+      "🤖 Это автоматический ассистент.\nЗдравствуйте!",
+    ]);
+  });
+
+  it.each([
+    ["uz-cyrl", "🤖 Бу автоматик ёрдамчи."],
+    ["en", "🤖 This is an automated assistant."],
+    ["other", "🤖 Bu avtomatik yordamchi."],
+  ])("writes the bot notice for %s as %j", async (language, notice) => {
+    mockAskClaude.mockResolvedValue(answer("OK", language));
+
+    await getProcessor()(dm("hi", "mid_1"));
+    await runAiReplies();
+
+    expect(sentTexts()).toEqual([`${notice}\nOK`]);
+  });
+
+  it("strips Markdown and sends a long answer as up to 3 messages, in order", async () => {
+    const paragraph = (word: string) => Array(100).fill(`${word} gap.`).join(" ");
+    mockAskClaude.mockResolvedValue(
+      answer(`**${paragraph("Bir")}**\n\n${paragraph("Ikki")}\n\n${paragraph("Uch")}`)
+    );
+
+    await getProcessor()(dm("salom", "mid_1"));
+    await runAiReplies();
+
+    expect(sentTexts()).toEqual([
+      `🤖 Bu avtomatik yordamchi.\n${paragraph("Bir")}`,
+      paragraph("Ikki"),
+      paragraph("Uch"),
+    ]);
+  });
+
+  it("stops at the first failed part and still counts the answer", async () => {
+    const paragraph = (word: string) => Array(100).fill(`${word} gap.`).join(" ");
+    mockAskClaude.mockResolvedValueOnce(
+      answer(`${paragraph("Bir")}\n\n${paragraph("Ikki")}\n\n${paragraph("Uch")}`)
+    );
+    mockSendDirectMessage
+      .mockResolvedValueOnce({ recipient_id: "follower_1", message_id: "msg_1" })
+      .mockRejectedValueOnce(new Error("Meta send failed"));
+
+    await getProcessor()(dm("salom", "mid_1"));
+    await runAiReplies();
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
+
+    await getProcessor()(dm("rahmat", "mid_2"));
+    await runAiReplies();
+    expect(sentTexts()[2]).toBe("Qo'llanma uchun LINK deb yozing."); // no second bot notice
+  });
+
+  it.each([
+    ["Claude fails, refuses or returns nothing usable", null],
+    ["Claude hands over (ticket 07 adds the handover text)", answer("Egasi javob beradi.", "uz-latn", true)],
+    ["the reply is empty", answer(" \n ")],
+  ])("stays silent when %s", async (_case, result) => {
+    mockAskClaude.mockResolvedValue(result);
+
+    await getProcessor()(dm("salom", "mid_1"));
+    await runAiReplies();
+
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("never fails the message job when the AI step fails", async () => {
+    mockPrisma.aiMessage.createMany.mockRejectedValue(new Error("relation does not exist"));
+
+    await expect(getProcessor()(dm("salom", "mid_1"))).resolves.toBeUndefined();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+
+  it("sends Claude the last 10 AI messages, oldest first, starting with the follower's", async () => {
+    for (let n = 1; n <= 6; n++) {
+      mockAskClaude.mockResolvedValueOnce(answer(`javob ${n}`));
+      await getProcessor()(dm(`savol ${n}`, `mid_${n}`));
+      await runAiReplies();
+      vi.setSystemTime(Date.now() + 60_000);
+    }
+    await getProcessor()(dm("savol 7", "mid_7"));
+    await runAiReplies();
+
+    expect(mockAskClaude.mock.calls[6][1]).toEqual([
+      { role: "user", content: "savol 3" },
+      { role: "assistant", content: "javob 3" },
+      { role: "user", content: "savol 4" },
+      { role: "assistant", content: "javob 4" },
+      { role: "user", content: "savol 5" },
+      { role: "assistant", content: "javob 5" },
+      { role: "user", content: "savol 6" },
+      { role: "assistant", content: "javob 6" },
+      { role: "user", content: "savol 7" },
+    ]);
+  });
+
+  it("never hands a job with an unknown name to the comment handler", async () => {
+    await getProcessor()({ name: "ai-echo", data: mockJobData, id: "echo_job", attemptsMade: 0 });
+
+    expect(mockPrisma.automation.findMany).not.toHaveBeenCalled();
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+  });
 });

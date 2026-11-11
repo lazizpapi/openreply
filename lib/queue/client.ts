@@ -77,15 +77,25 @@ export interface ProcessMessageJob {
   senderId: string;
 }
 
+// The AI assistant's delayed answer to a follower's DM (lib/ai/assistant.ts).
+export interface AiReplyJob {
+  accountConnectionId?: string;
+  instagramAccountId: string;
+  followerId: string;
+  messageId: string;
+}
+
 export type DmQueueJob =
   | ProcessCommentJob
   | ProcessPostbackJob
   | ProcessFollowUpJob
-  | ProcessMessageJob;
+  | ProcessMessageJob
+  | AiReplyJob;
 
 export const POSTBACK_JOB_NAME = "process-postback";
 export const FOLLOWUP_JOB_NAME = "process-followup";
 export const MESSAGE_JOB_NAME = "process-message";
+export const AI_REPLY_JOB_NAME = "ai-reply";
 
 let dmQueue: Queue<DmQueueJob> | null = null;
 

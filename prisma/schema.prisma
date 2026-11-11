@@ -160,6 +160,8 @@ model InstagramAccount {
   dmLogs      DmLog[]
   linkClicks  LinkClick[]
   followerSnapshots FollowerSnapshot[]
+  aiSettings  AiSettings?
+  aiMessages  AiMessage[]
 
   @@index([workspaceId])
 }
@@ -434,4 +436,41 @@ model ZernioConnection {
 model PostbackDelivery {
   id String @id
   createdAt DateTime @default(now())
+}
+
+// ─── AI assistant ───────────────────────────────────────────────────────────────
+
+/// The AI assistant's switch, AI instructions and daily AI limit for one account.
+model AiSettings {
+  id                 String   @id @default(cuid())
+  instagramAccountId String   @unique
+  enabled            Boolean  @default(false)
+  instructions       String   @default("")
+  dailyLimit         Int      @default(100)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+}
+
+enum AiMessageRole {
+  USER
+  ASSISTANT
+}
+
+/// One turn of the AI assistant's chat with a follower. Deleted after 30 days.
+model AiMessage {
+  id                 String        @id @default(cuid())
+  instagramAccountId String
+  followerId         String
+  role               AiMessageRole
+  text               String
+  /// The inbound Instagram message id (USER turns), so duplicate webhooks are no-ops.
+  messageId          String?       @unique
+  createdAt          DateTime      @default(now())
+
+  instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+
+  @@index([instagramAccountId, followerId, createdAt])
+  @@index([createdAt])
 }
