@@ -5,12 +5,29 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+const { mockPrisma, mockQueueAdd } = vi.hoisted(() => ({
+  mockPrisma: {
+    instagramAccount: { findMany: vi.fn() },
+    webhookEvent: { create: vi.fn(), update: vi.fn() },
+    dmLog: { findMany: vi.fn() },
+  },
+  mockQueueAdd: vi.fn(),
+}));
+
+vi.mock("@/lib/db/client", () => ({ prisma: mockPrisma }));
+vi.mock("@/lib/queue/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/queue/client")>()),
+  getDMQueue: () => ({ add: mockQueueAdd }),
+}));
+
 import {
   verifyWebhookSignature,
   parseCommentEvents,
   parseMessageEvents,
   parseReadEvents,
 } from "../lib/meta/webhook";
+import { processInstagramWebhook } from "../lib/queue/process-webhook";
 import { createHmac } from "crypto";
 
 // Mock the environment variable
@@ -513,5 +530,69 @@ describe("parseReadEvents", () => {
     };
 
     expect(parseReadEvents(payload)).toHaveLength(0);
+  });
+});
+
+describe("webhook intake: echoes of the account's own DMs", () => {
+  const echoes = {
+    object: "instagram",
+    entry: [
+      {
+        id: "ig_456",
+        time: 1234567890,
+        messaging: [
+          {
+            sender: { id: "ig_456" },
+            recipient: { id: "follower_1" },
+            message: { mid: "mid_owner", text: "Salom, o'zim javob beraman", is_echo: true },
+          },
+          {
+            sender: { id: "ig_456" },
+            recipient: { id: "follower_2" },
+            message: { mid: "mid_button", is_echo: true, attachments: [{ type: "template" }] },
+          },
+        ],
+      },
+    ],
+  } as Parameters<typeof processInstagramWebhook>[0]["payload"];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPrisma.instagramAccount.findMany.mockResolvedValue([
+      { id: "ig_account_row_1", instagramId: "ig_456", workspaceId: "workspace_123" },
+    ]);
+    mockPrisma.webhookEvent.create.mockResolvedValue({ id: "event_1" });
+    mockPrisma.webhookEvent.update.mockResolvedValue({});
+    mockPrisma.dmLog.findMany.mockResolvedValue([]);
+  });
+
+  it("queues an ai-echo job 15 seconds later for each echo on a META account", async () => {
+    await processInstagramWebhook({ payload: echoes, provider: "META" });
+
+    const echo = (followerId: string, messageId: string, isTemplate: boolean) => [
+      "ai-echo",
+      {
+        instagramAccountId: "ig_456",
+        accountConnectionId: "ig_account_row_1",
+        followerId,
+        messageId,
+        isTemplate,
+      },
+      expect.objectContaining({
+        delay: 15_000,
+        attempts: 1,
+        jobId: expect.stringContaining(Buffer.from(messageId).toString("base64url")),
+      }),
+    ];
+    expect(mockQueueAdd.mock.calls).toEqual([
+      echo("follower_1", "mid_owner", false),
+      echo("follower_2", "mid_button", true),
+    ]);
+  });
+
+  it("queues nothing for echoes on a Zernio account", async () => {
+    await processInstagramWebhook({ payload: echoes, provider: "ZERNIO", workspaceId: "workspace_123" });
+
+    expect(mockQueueAdd).not.toHaveBeenCalled();
   });
 });
