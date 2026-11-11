@@ -7,10 +7,13 @@ const { mockPrisma } = vi.hoisted(() => ({
     workspaceMember: { findFirst: vi.fn() },
     instagramAccount: {
       findUnique: vi.fn(),
+      findMany: vi.fn(),
+      update: vi.fn(),
       updateMany: vi.fn(),
       create: vi.fn(),
     },
     operationalEvent: { create: vi.fn() },
+    workspace: { updateMany: vi.fn() },
   },
 }));
 vi.mock("@/lib/db/client", () => ({ prisma: mockPrisma }));
@@ -26,6 +29,7 @@ import {
   verifyOAuthState,
 } from "../lib/meta/oauth";
 import { GET as instagramCallback } from "../app/api/instagram/callback/route";
+import { GET as refreshTokens } from "../app/api/cron/refresh-tokens/route";
 
 beforeEach(() => {
   vi.stubEnv("NEXTAUTH_SECRET", "test-secret-with-enough-length");
@@ -269,5 +273,97 @@ describe("Instagram callback under Unified login", () => {
         ([{ data }]) => data.instagramId
       )
     ).toEqual([IG_ID, SECOND]);
+  });
+
+  it("subscribes the account to comments, messages, postbacks and seen events", async () => {
+    graph({
+      "/oauth/access_token": { access_token: "system-token" },
+      "/me/assigned_instagram_accounts": { data: [{ id: IG_ID }] },
+      [`/${IG_ID}`]: { id: IG_ID, username: "owner" },
+      [`/${IG_ID}/subscribed_apps`]: { success: true },
+    });
+
+    await instagramCallback(callbackRequest());
+
+    const subscription = fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith(`/${IG_ID}/subscribed_apps`)
+    )!;
+    expect(new URL(subscription[0]).hostname).toBe("graph.facebook.com");
+    expect(JSON.parse(subscription[1].body).subscribed_fields).toEqual([
+      "comments",
+      "messages",
+      "messaging_postbacks",
+      "messaging_seen",
+    ]);
+  });
+
+  it("still connects when the webhook subscription fails", async () => {
+    graph({
+      "/oauth/access_token": { access_token: "system-token" },
+      "/me/assigned_instagram_accounts": { data: [{ id: IG_ID }] },
+      [`/${IG_ID}`]: { id: IG_ID, username: "owner" },
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const response = await instagramCallback(callbackRequest());
+
+    expect(response.headers.get("location")).toBe(
+      "https://app.test/dashboard?connected=true"
+    );
+    expect(mockPrisma.instagramAccount.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ webhookSubscribed: false }),
+    });
+  });
+});
+
+describe("refresh-tokens cron", () => {
+  const fetchMock = vi.fn();
+  const cronRequest = () =>
+    new NextRequest("https://app.test/api/cron/refresh-tokens", {
+      headers: { authorization: "Bearer cron-secret" },
+    });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("CRON_SECRET", "cron-secret");
+    mockPrisma.workspace.updateMany.mockResolvedValue({ count: 0 });
+    mockPrisma.instagramAccount.findMany.mockResolvedValue([]);
+  });
+
+  it("never selects an account with no token expiry, so Unified-login accounts are skipped", async () => {
+    await refreshTokens(cronRequest());
+    expect(mockPrisma.instagramAccount.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          tokenExpiresAt: expect.objectContaining({ not: null }),
+        }),
+      })
+    );
+  });
+
+  it("refreshes Instagram-login tokens on graph.instagram.com even with Unified login configured", async () => {
+    vi.stubEnv("META_LOGIN_CONFIG_ID", "cfg");
+    mockPrisma.instagramAccount.findMany.mockResolvedValue([
+      {
+        id: "account_1",
+        workspaceId: "workspace_1",
+        username: "owner",
+        accessToken: encryptToken("ig-token"),
+      },
+    ]);
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ access_token: "ig-token-2", expires_in: 60 }))
+    );
+
+    const body = await (await refreshTokens(cronRequest())).json();
+
+    expect(body.data.results[0].status).toBe("refreshed");
+    const url = new URL(fetchMock.mock.calls[0][0]);
+    expect(url.origin + url.pathname).toMatch(
+      /^https:\/\/graph\.instagram\.com\/v[\d.]+\/refresh_access_token$/
+    );
+    const { data } = mockPrisma.instagramAccount.update.mock.calls[0][0];
+    expect(decryptToken(data.accessToken)).toBe("ig-token-2");
   });
 });

@@ -904,8 +904,11 @@ export async function subscribeInstagramAccountToWebhooks(
         "Content-Type": "application/json",
         Authorization: `Bearer ${accessToken}`,
       },
+      // Best effort: the Meta dashboard subscription stays the source of truth.
       body: JSON.stringify({
-        subscribed_fields: ["comments", "messages"],
+        subscribed_fields: isUnifiedLogin()
+          ? ["comments", "messages", "messaging_postbacks", "messaging_seen"]
+          : ["comments", "messages"],
       }),
     }
   );
