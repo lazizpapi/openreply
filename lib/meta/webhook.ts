@@ -202,7 +202,8 @@ export function parsePostbackEvents(
  * Echoes (messages the account itself sent, including our own autoreplies),
  * deletions, and attachment-only messages with no text are dropped here so
  * the worker never sees them — an echo would otherwise let an autoreply
- * containing its own keyword trigger itself.
+ * containing its own keyword trigger itself. Human takeover reads echoes
+ * through parseEchoEvents instead.
  */
 export function parseMessageEvents(
   payload: WebhookPayload
@@ -233,6 +234,45 @@ export function parseMessageEvents(
         messageId,
         messageText: text,
         senderId,
+      });
+    }
+  }
+
+  return events;
+}
+
+export interface WebhookEchoEvent {
+  instagramAccountId: string;
+  followerId: string;
+  messageId: string;
+  isTemplate: boolean;
+  text?: string;
+}
+
+/**
+ * Parse echoes: DMs the account itself sent, by the bot or by the owner from
+ * the Instagram app. Human takeover tells the two apart in the worker.
+ */
+export function parseEchoEvents(payload: WebhookPayload): WebhookEchoEvent[] {
+  const events: WebhookEchoEvent[] = [];
+
+  if (payload.object !== "instagram") return events;
+
+  for (const entry of payload.entry ?? []) {
+    for (const messaging of entry.messaging ?? []) {
+      const message = messaging.message;
+      if (!message?.is_echo || message.is_deleted) continue;
+
+      const followerId = messaging.recipient?.id;
+      const accountId = entry.id ?? messaging.sender?.id;
+      if (!message.mid || !followerId || !accountId || followerId === accountId) continue;
+
+      events.push({
+        instagramAccountId: accountId,
+        followerId,
+        messageId: message.mid,
+        isTemplate: Boolean(message.attachments?.some((a) => a.type === "template")),
+        text: message.text,
       });
     }
   }

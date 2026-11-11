@@ -6,14 +6,16 @@ import {
 } from "@/lib/instagram/delivery-errors";
 import { claimCommentDelivery, MAX_COMMENT_SEND_ATTEMPTS } from "./comment-delivery";
 import { sendNudge } from "./nudge";
-import { handleAiMessage, processAiReply } from "@/lib/ai/assistant";
+import { handleAiMessage, processAiEcho, processAiReply } from "@/lib/ai/assistant";
 import { clearPendingButton } from "@/lib/instagram/bot-sends";
 import { createHash } from "node:crypto";
 import { UnrecoverableError, Worker, type Job } from "bullmq";
 import {
   getDMQueue,
   getRedisConnection,
+  AI_ECHO_JOB_NAME,
   AI_REPLY_JOB_NAME,
+  type AiEchoJob,
   type AiReplyJob,
   MESSAGE_JOB_NAME,
   POSTBACK_JOB_NAME,
@@ -1557,6 +1559,9 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
 async function dispatchJob(job: Job<DmQueueJob>): Promise<void> {
   if (job.name === AI_REPLY_JOB_NAME) {
     return processAiReply(job.data as AiReplyJob);
+  }
+  if (job.name === AI_ECHO_JOB_NAME) {
+    return processAiEcho(job.data as AiEchoJob);
   }
   if (job.name === POSTBACK_JOB_NAME) {
     return processPostback(job as Job<ProcessPostbackJob>);

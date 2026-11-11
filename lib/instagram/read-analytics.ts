@@ -22,6 +22,19 @@ export async function getUserFollowStatus({
   }
 }
 
+/** Whether the owner's account follows this user. Zernio exposes no such read: null. */
+export async function getBusinessFollowsUser({
+  context,
+  recipientId,
+}: {
+  context: InstagramContext;
+  recipientId: string;
+}): Promise<boolean | null> {
+  if (context.provider === "META")
+    return meta.getBusinessFollowsUser(context.accessToken, recipientId);
+  return null;
+}
+
 /**
  * The handle behind an IGSID. Zernio exposes no equivalent lookup, so a Zernio
  * account gets null and the message renders its fallback, as it does today.
