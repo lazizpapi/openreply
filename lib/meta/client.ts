@@ -293,12 +293,31 @@ export async function sendDirectMessageWithButton(
  * false, or `null` when Meta does not return the field — so callers can decide
  * how to treat the unverifiable case.
  */
-export async function getUserFollowStatus(
+export function getUserFollowStatus(
   accessToken: string,
   recipientId: string
 ): Promise<boolean | null> {
+  return readFollowField(accessToken, recipientId, "is_user_follow_business");
+}
+
+/**
+ * Whether the business account follows the user (the reverse of
+ * getUserFollowStatus), from the same profile API. null when unknown.
+ */
+export function getBusinessFollowsUser(
+  accessToken: string,
+  recipientId: string
+): Promise<boolean | null> {
+  return readFollowField(accessToken, recipientId, "is_business_follow_user");
+}
+
+async function readFollowField(
+  accessToken: string,
+  recipientId: string,
+  field: "is_user_follow_business" | "is_business_follow_user"
+): Promise<boolean | null> {
   const url = new URL(`${instagramGraphBase()}/${recipientId}`);
-  url.searchParams.set("fields", "is_user_follow_business");
+  url.searchParams.set("fields", field);
 
   try {
     const response = await fetch(url.toString(), {
@@ -307,9 +326,7 @@ export async function getUserFollowStatus(
     });
     if (!response.ok) return null;
     const data = await response.json();
-    return typeof data?.is_user_follow_business === "boolean"
-      ? data.is_user_follow_business
-      : null;
+    return typeof data?.[field] === "boolean" ? data[field] : null;
   } catch {
     return null;
   }

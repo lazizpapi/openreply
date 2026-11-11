@@ -10,6 +10,7 @@ import {
   sendPrivateReplyWithButton,
   sendDirectMessageWithLinkButton,
   getRecentMediaComments,
+  getBusinessFollowsUser,
   getUserFollowStatus,
   getUserInfo,
   getUserMedia,
@@ -181,6 +182,32 @@ describe("Instagram provider boundary", () => {
     expect(send.origin + send.pathname).toMatch(
       /^https:\/\/graph\.facebook\.com\/v[\d.]+\/17841400000000001\/messages$/
     );
+  });
+  it.each([
+    ["INSTAGRAM", "", /^https:\/\/graph\.instagram\.com\/v[\d.]+\/follower$/],
+    ["UNIFIED", "cfg", /^https:\/\/graph\.facebook\.com\/v[\d.]+\/follower$/],
+  ])(
+    "reads both follow directions from the follower's profile under %s login",
+    async (_mode, configId, endpoint) => {
+      vi.stubEnv("META_LOGIN_CONFIG_ID", configId);
+      const meta = await createInstagramContext(metaAccount);
+      respond({ is_user_follow_business: false, id: "follower" });
+      respond({ is_business_follow_user: true, id: "follower" });
+      fetchMock.mockRejectedValueOnce(new Error("network down"));
+
+      expect(await getUserFollowStatus({ context: meta, recipientId: "follower" })).toBe(false);
+      expect(await getBusinessFollowsUser({ context: meta, recipientId: "follower" })).toBe(true);
+      expect(await getBusinessFollowsUser({ context: meta, recipientId: "follower" })).toBeNull();
+      const [gate, owner] = fetchMock.mock.calls.map(([u]) => new URL(u));
+      expect(gate.origin + gate.pathname).toMatch(endpoint);
+      expect(gate.searchParams.get("fields")).toBe("is_user_follow_business");
+      expect(owner.origin + owner.pathname).toMatch(endpoint);
+      expect(owner.searchParams.get("fields")).toBe("is_business_follow_user");
+    }
+  );
+  it("knows nothing about the owner's follows on Zernio", async () => {
+    expect(await getBusinessFollowsUser({ context, recipientId: "person" })).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
   it.each([
     [429, RateLimitError],
