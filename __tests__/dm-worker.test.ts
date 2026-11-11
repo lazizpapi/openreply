@@ -19,6 +19,8 @@ const {
   mockReleaseWorkspaceDMReservation,
   mockAskClaude,
   mockGetWorkspaceInstagramAccount,
+  mockSendMail,
+  mockCreateTransport,
   afterTasks,
 } = vi.hoisted(() => ({
   mockPrisma: {
@@ -47,6 +49,9 @@ const {
     instagramAccount: {
       findUnique: vi.fn(),
     },
+    workspace: {
+      findUnique: vi.fn(),
+    },
     operationalEvent: {
       create: vi.fn(),
     },
@@ -68,8 +73,13 @@ const {
   mockReleaseWorkspaceDMReservation: vi.fn(),
   mockAskClaude: vi.fn(),
   mockGetWorkspaceInstagramAccount: vi.fn(),
+  mockSendMail: vi.fn(),
+  mockCreateTransport: vi.fn(),
   afterTasks: [] as unknown[],
 }));
+
+// SMTP for the handover email when EMAIL_SERVER is set.
+vi.mock("nodemailer", () => ({ default: { createTransport: mockCreateTransport } }));
 
 // The Claude call is mocked at the AI provider boundary; the prompt builder is real.
 vi.mock("@/lib/ai/provider", async (importOriginal) => ({
@@ -2147,6 +2157,7 @@ describe("DM Worker — AI assistant", () => {
   const account = {
     id: "ig_account_row_1",
     instagramId: "ig_456",
+    username: "lazizbek_papi_uz",
     provider: "META",
     workspaceId: "workspace_123",
     zernioAccountId: null,
@@ -2483,7 +2494,6 @@ describe("DM Worker — AI assistant", () => {
 
   it.each([
     ["Claude fails, refuses or returns nothing usable", null],
-    ["Claude hands over (ticket 07 adds the handover text)", answer("Egasi javob beradi.", "uz-latn", true)],
     ["the reply is empty", answer(" \n ")],
   ])("stays silent when %s", async (_case, result) => {
     mockAskClaude.mockResolvedValue(result);
@@ -2662,6 +2672,163 @@ describe("DM Worker — AI assistant", () => {
       expect((await replyFromInbox("Salom")).status).toBe(502);
       await followerWrites("salom", "mid_1");
       expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("handover", () => {
+    const HOUR_MS = 60 * 60 * 1000;
+    const unsure = answer("Bilmayman.", "uz-latn", true);
+    const mockFetch = vi.fn();
+
+    // Emails sent through Resend's REST API.
+    const emails = () =>
+      mockFetch.mock.calls
+        .filter(([url]) => url === "https://api.resend.com/emails")
+        .map(([, init]) => ({ headers: init.headers, ...JSON.parse(init.body) }));
+
+    async function followerWrites(text: string, mid: string) {
+      await getProcessor()(dm(text, mid));
+      await runAiReplies();
+    }
+
+    beforeEach(() => {
+      vi.stubEnv("REDIS_URL", "redis://fake");
+      vi.mocked(getRedisConnection).mockReturnValue(createFakeRedis() as never);
+      vi.stubEnv("EMAIL_SERVER", "");
+      vi.stubEnv("RESEND_API_KEY", "re_test_key");
+      vi.stubEnv("EMAIL_FROM", "OpenReply <ai@lazizpapi.uz>");
+      mockFetch.mockReset().mockResolvedValue(new Response('{"id":"email_1"}', { status: 200 }));
+      vi.stubGlobal("fetch", mockFetch);
+      mockCreateTransport.mockReturnValue({ sendMail: mockSendMail });
+      mockPrisma.workspace.findUnique.mockResolvedValue({ owner: { email: "owner@lazizpapi.uz" } });
+      mockAskClaude.mockResolvedValue(unsure);
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("tells the follower the owner will answer soon and emails the owner their username and message", async () => {
+      await followerWrites("kurs qachon boshlanadi?", "mid_1");
+
+      expect(sentTexts()).toEqual(["🤖 Bu avtomatik yordamchi.\nBunga tez orada oʻzim javob beraman."]);
+      expect(emails()).toEqual([
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: "Bearer re_test_key" }),
+          from: "OpenReply <ai@lazizpapi.uz>",
+          to: ["owner@lazizpapi.uz"],
+          subject: expect.stringContaining("@commenter_user"),
+        }),
+      ]);
+      const [{ text }] = emails();
+      expect(text).toContain("@commenter_user");
+      expect(text).toContain("@lazizbek_papi_uz");
+      expect(text).toContain("kurs qachon boshlanadi?");
+      expect(text).toContain("12 hours");
+      expect(mockPrisma.workspace.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: "workspace_123" } })
+      );
+    });
+
+    it("stays silent, with no second email, when the follower writes again within 12 hours", async () => {
+      await followerWrites("kurs qachon boshlanadi?", "mid_1");
+      vi.setSystemTime(Date.now() + 11 * HOUR_MS);
+      await followerWrites("javob bering", "mid_2");
+
+      expect(mockAskClaude).toHaveBeenCalledTimes(1);
+      expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(emails()).toHaveLength(1);
+
+      vi.setSystemTime(Date.now() + HOUR_MS);
+      mockAskClaude.mockResolvedValue(answer("Kurs dekabrda boshlanadi."));
+      await followerWrites("hali ham kutyapman", "mid_3");
+
+      // The handover text was stored as the AI's answer: no second bot notice, and Claude sees it.
+      expect(sentTexts()[1]).toBe("Kurs dekabrda boshlanadi.");
+      expect(mockAskClaude.mock.calls[1][1]).toContainEqual({
+        role: "assistant",
+        content: "Bunga tez orada oʻzim javob beraman.",
+      });
+      expect(emails()).toHaveLength(1);
+    });
+
+    it.each([
+      ["uz-cyrl", "🤖 Бу автоматик ёрдамчи.\nБунга тез орада ўзим жавоб бераман."],
+      ["ru", "🤖 Это автоматический ассистент.\nСкоро отвечу на это лично."],
+      ["en", "🤖 This is an automated assistant.\nI'll answer this myself soon."],
+      ["other", "🤖 Bu avtomatik yordamchi.\nBunga tez orada oʻzim javob beraman."],
+    ])("writes the handover text for %s as %j", async (language, text) => {
+      mockAskClaude.mockResolvedValue(answer("?", language, true));
+
+      await followerWrites("hi", "mid_1");
+
+      expect(sentTexts()).toEqual([text]);
+    });
+
+    it("hands over when the reply has a link that is not in the AI instructions", async () => {
+      mockAskClaude.mockResolvedValue(answer("Qoʻllanma shu yerda: https://drive.google.com/file/d/abc"));
+
+      await followerWrites("qoʻllanmani yuboring", "mid_1");
+
+      expect(sentTexts()).toEqual(["🤖 Bu avtomatik yordamchi.\nBunga tez orada oʻzim javob beraman."]);
+      expect(emails()).toHaveLength(1);
+      vi.setSystemTime(Date.now() + HOUR_MS);
+      await followerWrites("iltimos", "mid_2");
+      expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends a link written in the AI instructions as a normal reply", async () => {
+      mockAskClaude.mockResolvedValue(answer("Telegram kanalim: https://t.me/lazizpapi."));
+
+      await followerWrites("telegram bormi?", "mid_1");
+
+      expect(sentTexts()).toEqual(["🤖 Bu avtomatik yordamchi.\nTelegram kanalim: https://t.me/lazizpapi."]);
+      expect(emails()).toHaveLength(0);
+    });
+
+    it.each([
+      ["Resend is unreachable", () => mockFetch.mockRejectedValue(new Error("fetch failed"))],
+      ["Resend refuses the email", () => mockFetch.mockResolvedValue(new Response("{}", { status: 403 }))],
+      ["the owner lookup fails", () => mockPrisma.workspace.findUnique.mockRejectedValue(new Error("db down"))],
+    ])("still hands over and pauses when %s", async (_case, setup) => {
+      setup();
+
+      await followerWrites("kurs qachon boshlanadi?", "mid_1");
+      vi.setSystemTime(Date.now() + HOUR_MS);
+      await followerWrites("javob bering", "mid_2");
+
+      expect(sentTexts()).toEqual(["🤖 Bu avtomatik yordamchi.\nBunga tez orada oʻzim javob beraman."]);
+      expect(mockAskClaude).toHaveBeenCalledTimes(1);
+    });
+
+    it("hands over without an email when no email is configured", async () => {
+      vi.stubEnv("RESEND_API_KEY", "");
+
+      await followerWrites("kurs qachon boshlanadi?", "mid_1");
+      vi.setSystemTime(Date.now() + HOUR_MS);
+      await followerWrites("javob bering", "mid_2");
+
+      expect(sentTexts()).toEqual(["🤖 Bu avtomatik yordamchi.\nBunga tez orada oʻzim javob beraman."]);
+      expect(mockAskClaude).toHaveBeenCalledTimes(1);
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(mockSendMail).not.toHaveBeenCalled();
+    });
+
+    it("sends the email through EMAIL_SERVER when it is set", async () => {
+      vi.stubEnv("EMAIL_SERVER", "smtps://ai%40lazizpapi.uz:secret@mail.lazizpapi.uz:465");
+
+      await followerWrites("kurs qachon boshlanadi?", "mid_1");
+
+      expect(mockCreateTransport).toHaveBeenCalledWith("smtps://ai%40lazizpapi.uz:secret@mail.lazizpapi.uz:465");
+      expect(mockSendMail).toHaveBeenCalledTimes(1);
+      expect(mockSendMail).toHaveBeenCalledWith(
+        expect.objectContaining({
+          from: "OpenReply <ai@lazizpapi.uz>",
+          to: "owner@lazizpapi.uz",
+          text: expect.stringContaining("kurs qachon boshlanadi?"),
+        })
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 

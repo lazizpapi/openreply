@@ -37,13 +37,41 @@ export function stripMarkdown(text: string): string {
     .replace(/`+/g, "");
 }
 
+// Anything Instagram may show as a link: an email, a URL with a scheme or
+// "www.", or a bare domain (ASCII letters only in its last part).
+const LINK =
+  /[\w.+-]+@[\w-]+(?:\.[\w-]+)+|\b(?:https?:\/\/|www\.)\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\b(?:\/\S*)?/gi;
+const TRAILING_PUNCTUATION = /[.,:;!?)\]}"'»…]+$/;
+
+/** The link guard: every link in a reply must appear verbatim in the AI instructions. */
+export function hasOnlyKnownLinks(reply: string, instructions: string): boolean {
+  return Array.from(reply.matchAll(LINK), ([link]) => link.replace(TRAILING_PUNCTUATION, "")).every(
+    (link) => instructions.includes(link)
+  );
+}
+
+const HANDOVER_TEXTS: Record<AiLanguage, string> = {
+  "uz-latn": "Bunga tez orada oʻzim javob beraman.",
+  "uz-cyrl": "Бунга тез орада ўзим жавоб бераман.",
+  ru: "Скоро отвечу на это лично.",
+  en: "I'll answer this myself soon.",
+  other: "Bunga tez orada oʻzim javob beraman.",
+};
+
 /**
- * The reply text Claude's answer turns into, before the bot notice and
- * splitting. Used by the Settings "Try it" box. Ticket 07: the link guard and
- * the fixed handover text go here, and the worker should call this too.
+ * The text Claude's answer turns into, before the bot notice and splitting.
+ * Shared by the worker and the Settings "Try it" box. A handover from the
+ * model, or a link not written in the AI instructions, becomes the fixed
+ * handover text in the follower's language.
  */
-export function shapeAnswer(answer: AiAnswer): { reply: string; handover: boolean } {
-  return { reply: stripMarkdown(answer.reply).trim(), handover: answer.handover };
+export function shapeAnswer(
+  answer: AiAnswer,
+  instructions: string
+): { reply: string; handover: boolean } {
+  const reply = stripMarkdown(answer.reply).trim();
+  if (answer.handover || !hasOnlyKnownLinks(reply, instructions))
+    return { reply: HANDOVER_TEXTS[answer.language] ?? HANDOVER_TEXTS["uz-latn"], handover: true };
+  return { reply, handover: false };
 }
 
 const byteLength = (text: string) => Buffer.byteLength(text, "utf8");

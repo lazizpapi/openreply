@@ -22,7 +22,7 @@ export const POST = withAiManagement(async ({ workspaceId }, request) => {
   const answer = await askClaude(buildSystemPrompt(instructions, await liveDmCampaigns(account.id)), [
     { role: "user", content: message },
   ]);
-  const shaped = answer && shapeAnswer(answer);
+  const shaped = answer && shapeAnswer(answer, instructions);
   if (!shaped?.reply)
     return NextResponse.json(
       {
