@@ -674,6 +674,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           context: accessToken,
           instagramAccountId: automation.instagramAccount.instagramId,
           commentId: commentId,
+          recipientId: commenterId,
           text: openingText,
           buttonTitle: automation.openingDmButtonLabel as string,
           // The ":open" marker tells a tap here apart from the follow prompt's
@@ -692,6 +693,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           context: accessToken,
           instagramAccountId: automation.instagramAccount.instagramId,
           commentId: commentId,
+          recipientId: commenterId,
           text: promptText,
           buttonTitle: automation.followPromptButtonLabel || "i'm following",
           payload: `followcheck:${automation.id}`,
@@ -715,6 +717,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
             context: accessToken,
             instagramAccountId: automation.instagramAccount.instagramId,
             commentId: commentId,
+            recipientId: commenterId,
             text: bodyText,
             buttons: buttons,
             postId: mediaId,
@@ -741,6 +744,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
               context: accessToken,
               instagramAccountId: automation.instagramAccount.instagramId,
               commentId: commentId,
+              recipientId: commenterId,
               message: fallbackMessage,
               postId: mediaId,
             });
@@ -759,6 +763,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           context: accessToken,
           instagramAccountId: automation.instagramAccount.instagramId,
           commentId: commentId,
+          recipientId: commenterId,
           message: dmMessage,
           postId: mediaId,
         });
