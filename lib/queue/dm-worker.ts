@@ -5,6 +5,8 @@ import {
   isDeliveryUnconfirmed,
 } from "@/lib/instagram/delivery-errors";
 import { claimCommentDelivery, MAX_COMMENT_SEND_ATTEMPTS } from "./comment-delivery";
+import { sendNudge } from "./nudge";
+import { clearPendingButton } from "@/lib/instagram/bot-sends";
 import { createHash } from "node:crypto";
 import { UnrecoverableError, Worker, type Job } from "bullmq";
 import {
@@ -674,6 +676,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           context: accessToken,
           instagramAccountId: automation.instagramAccount.instagramId,
           commentId: commentId,
+          recipientId: commenterId,
           text: openingText,
           buttonTitle: automation.openingDmButtonLabel as string,
           // The ":open" marker tells a tap here apart from the follow prompt's
@@ -692,6 +695,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           context: accessToken,
           instagramAccountId: automation.instagramAccount.instagramId,
           commentId: commentId,
+          recipientId: commenterId,
           text: promptText,
           buttonTitle: automation.followPromptButtonLabel || "i'm following",
           payload: `followcheck:${automation.id}`,
@@ -715,6 +719,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
             context: accessToken,
             instagramAccountId: automation.instagramAccount.instagramId,
             commentId: commentId,
+            recipientId: commenterId,
             text: bodyText,
             buttons: buttons,
             postId: mediaId,
@@ -741,6 +746,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
               context: accessToken,
               instagramAccountId: automation.instagramAccount.instagramId,
               commentId: commentId,
+              recipientId: commenterId,
               message: fallbackMessage,
               postId: mediaId,
             });
@@ -759,6 +765,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           context: accessToken,
           instagramAccountId: automation.instagramAccount.instagramId,
           commentId: commentId,
+          recipientId: commenterId,
           message: dmMessage,
           postId: mediaId,
         });
@@ -888,6 +895,9 @@ async function sendFollowRecheckAck({
  */
 async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   const { instagramAccountId, userId, payload, fallback } = job.data;
+  // A tap answers the pending button. A read fallback is no tap: the follower
+  // who only read it is exactly who a yes-word nudge is for.
+  if (!fallback) clearPendingButton(instagramAccountId, userId);
 
   const isFollowCheck = payload.startsWith("followcheck:");
   if (!isFollowCheck && !payload.startsWith("reveal:")) return;
@@ -1299,6 +1309,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   });
 
   const dedupeId = `dm:${messageId}`;
+  let campaignMatched = false;
 
   for (const automation of automations) {
     const matchResult = automation.matchAnyWord
@@ -1310,6 +1321,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
         );
 
     if (!matchResult.matched) continue;
+    campaignMatched = true;
 
     const existingLog = await prisma.dmLog.findUnique({
       where: {
@@ -1532,6 +1544,12 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
       throw error;
     }
   }
+
+  // A campaign keyword always wins; only an unmatched DM can be a nudge.
+  if (campaignMatched) return;
+  if (await sendNudge(job.data)) return;
+  // Hook point: the AI assistant answers here, when no campaign matched and no
+  // nudge was sent.
 }
 
 async function dispatchJob(job: Job<DmQueueJob>): Promise<void> {

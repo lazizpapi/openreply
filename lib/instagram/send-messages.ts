@@ -6,6 +6,12 @@ import {
   ZernioDeliveryUnconfirmedError,
 } from "@/lib/zernio/client";
 import type { InstagramContext, ZernioContext } from "./context";
+import {
+  clearPendingButton,
+  recordBotSend,
+  recordPendingButton,
+  type PendingButton,
+} from "./bot-sends";
 
 type Button =
   | { type: "url"; title: string; url: string }
@@ -73,7 +79,7 @@ function linkButtons(buttons: meta.LinkButton[]): Button[] {
     .map(({ title, url }) => ({ type: "url", title: title.slice(0, 20), url }));
 }
 
-export async function sendPrivateReply({
+async function sendPrivateReplyUntracked({
   context,
   instagramAccountId,
   commentId,
@@ -96,7 +102,7 @@ export async function sendPrivateReply({
   return sendZernioMessage({ context, commentId, postId, text: message });
 }
 
-export async function sendPrivateReplyWithButton({
+async function sendPrivateReplyWithButtonUntracked({
   context,
   instagramAccountId,
   commentId,
@@ -131,7 +137,7 @@ export async function sendPrivateReplyWithButton({
   });
 }
 
-export async function sendDirectMessageWithButton({
+async function sendDirectMessageWithButtonUntracked({
   context,
   instagramAccountId,
   userId,
@@ -163,7 +169,7 @@ export async function sendDirectMessageWithButton({
   });
 }
 
-export async function sendPrivateReplyWithLinkButton({
+async function sendPrivateReplyWithLinkButtonUntracked({
   context,
   instagramAccountId,
   commentId,
@@ -195,7 +201,7 @@ export async function sendPrivateReplyWithLinkButton({
   });
 }
 
-export async function sendDirectMessage({
+async function sendDirectMessageUntracked({
   context,
   instagramAccountId,
   userId,
@@ -216,7 +222,7 @@ export async function sendDirectMessage({
   return sendZernioMessage({ context, recipientId: userId, text: message });
 }
 
-export async function sendDirectMessageWithLinkButton({
+async function sendDirectMessageWithLinkButtonUntracked({
   context,
   instagramAccountId,
   userId,
@@ -269,4 +275,84 @@ export async function sendCommentReply({
   });
   if (!result?.data?.commentId) throw new ZernioDeliveryUnconfirmedError();
   return { id: result.data.commentId };
+}
+
+// ─── Bot-send tracking ──────────────────────────────────────────────────────
+// The exported DM sends wrap the untracked ones above. On META accounts every
+// successful send is recorded as bot-sent, a postback-button send records the
+// follower's pending button, and a link-button send (the lead magnet) clears it.
+
+type SendArgs<F extends (args: never) => unknown> = Parameters<F>[0];
+
+function track(
+  { context, instagramAccountId }: { context: InstagramContext; instagramAccountId: string },
+  recipientId: string,
+  text: string,
+  result: { message_id?: string },
+  pending?: Omit<PendingButton, "campaignId" | "text"> | "clear"
+) {
+  if (context.provider !== "META") return;
+  recordBotSend(recipientId, text, result.message_id);
+  if (pending === "clear") clearPendingButton(instagramAccountId, recipientId);
+  // Campaign payloads are `reveal:<id>[:open]` or `followcheck:<id>[:open]`.
+  else if (pending)
+    recordPendingButton(instagramAccountId, recipientId, {
+      campaignId: pending.payload.split(":")[1] ?? "",
+      text,
+      ...pending,
+    });
+}
+
+export async function sendPrivateReply(
+  args: SendArgs<typeof sendPrivateReplyUntracked> & { recipientId: string }
+) {
+  const result = await sendPrivateReplyUntracked(args);
+  track(args, args.recipientId, args.message, result);
+  return result;
+}
+
+export async function sendPrivateReplyWithButton(
+  args: SendArgs<typeof sendPrivateReplyWithButtonUntracked> & { recipientId: string }
+) {
+  const result = await sendPrivateReplyWithButtonUntracked(args);
+  track(args, args.recipientId, args.text, result, {
+    buttonTitle: args.buttonTitle,
+    payload: args.payload,
+    via: "private_reply",
+  });
+  return result;
+}
+
+export async function sendPrivateReplyWithLinkButton(
+  args: SendArgs<typeof sendPrivateReplyWithLinkButtonUntracked> & { recipientId: string }
+) {
+  const result = await sendPrivateReplyWithLinkButtonUntracked(args);
+  track(args, args.recipientId, args.text, result, "clear");
+  return result;
+}
+
+export async function sendDirectMessage(args: SendArgs<typeof sendDirectMessageUntracked>) {
+  const result = await sendDirectMessageUntracked(args);
+  track(args, args.userId, args.message, result);
+  return result;
+}
+
+export async function sendDirectMessageWithButton(
+  args: SendArgs<typeof sendDirectMessageWithButtonUntracked>
+) {
+  const result = await sendDirectMessageWithButtonUntracked(args);
+  track(args, args.userId, args.text, result, {
+    buttonTitle: args.buttonTitle,
+    payload: args.payload,
+    via: "dm",
+  });
+  return result;
+}
+
+export async function sendDirectMessageWithLinkButton(
+  args: SendArgs<typeof sendDirectMessageWithLinkButtonUntracked>
+) {
+  const result = await sendDirectMessageWithLinkButtonUntracked(args);
+  track(args, args.userId, args.text, result, "clear");
+  return result;
 }

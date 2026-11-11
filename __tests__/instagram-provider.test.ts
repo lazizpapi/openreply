@@ -63,6 +63,7 @@ describe("Instagram provider boundary", () => {
       context,
       instagramAccountId: "ig",
       commentId: "comment",
+      recipientId: "recipient",
       postId: "post",
       text: "hello",
       buttonTitle: "Reveal",

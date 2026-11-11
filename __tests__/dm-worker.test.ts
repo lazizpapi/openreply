@@ -1751,6 +1751,292 @@ it("deduplicates a redelivered Meta button tap after queue retention expires", a
   expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
 });
 
+// In-memory stand-in for the Redis commands the worker uses, with real TTLs
+// measured against Date.now().
+function createFakeRedis() {
+  const store = new Map<string, { value: string; expiresAt: number }>();
+  const live = (key: string) => {
+    const entry = store.get(key);
+    if (entry && entry.expiresAt <= Date.now()) store.delete(key);
+    return store.get(key);
+  };
+  return {
+    store,
+    get: vi.fn(async (key: string) => live(key)?.value ?? null),
+    set: vi.fn(
+      async (key: string, value: string, _ex: "EX", seconds: number, nx?: "NX") => {
+        if (nx && live(key)) return null;
+        store.set(key, { value, expiresAt: Date.now() + seconds * 1000 });
+        return "OK";
+      }
+    ),
+    del: vi.fn(async (key: string) => (store.delete(key) ? 1 : 0)),
+  };
+}
+
+describe("DM Worker — nudge", () => {
+  const opening = {
+    ...mockAutomation,
+    requireFollow: false,
+    openingDmEnabled: true,
+    openingDmMessage: "Tap below {username}",
+    openingDmButtonLabel: "Send it",
+  };
+  let redis: ReturnType<typeof createFakeRedis>;
+
+  function dm(text: string, mid = `mid_${text}`) {
+    return {
+      name: "process-message",
+      data: {
+        instagramAccountId: "ig_456",
+        messageId: mid,
+        messageText: text,
+        senderId: "commenter_999",
+      },
+      id: `message_job_${mid}`,
+      attemptsMade: 0,
+    };
+  }
+
+  beforeEach(() => {
+    redis = createFakeRedis();
+    vi.stubEnv("REDIS_URL", "redis://fake");
+    vi.mocked(getRedisConnection).mockReturnValue(redis as never);
+    mockPrisma.automation.findMany.mockResolvedValue([opening]);
+    mockPrisma.automation.findFirst.mockResolvedValue(opening);
+    mockMatchKeywords.mockImplementation((text: string) =>
+      text.includes("LINK")
+        ? { matched: true, matchedKeyword: "LINK" }
+        : { matched: false, matchedKeyword: null }
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("resends the opening DM's own message and button when the follower types a yes-word", async () => {
+    await getProcessor()(createMockJob());
+    await getProcessor()(dm("ha"));
+
+    expect(mockSendDirectMessageWithButton).toHaveBeenCalledTimes(1);
+    expect(mockSendDirectMessageWithButton).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "commenter_999",
+      "Tap below commenter_user",
+      "Send it",
+      "reveal:auto_789:open"
+    );
+  });
+
+  it.each(["ha", "xa", "ҳа", "да", "yes", "+", "ok", "👍", "❤️", "haaa", "daaa", "++", "  HA "])(
+    "counts %j as a yes-word",
+    async (text) => {
+      await getProcessor()(createMockJob());
+      await getProcessor()(dm(text));
+
+      expect(mockSendDirectMessageWithButton).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it.each(["haha", "ha ok", "yes please", "hello"])(
+    "does not count %j as a yes-word",
+    async (text) => {
+      await getProcessor()(createMockJob());
+      await getProcessor()(dm(text));
+
+      expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+    }
+  );
+
+  it("stops nudging once the follower has tapped the button", async () => {
+    await getProcessor()(createMockJob());
+    await getProcessor()(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "reveal:auto_789:open",
+      })
+    );
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1); // the reveal
+
+    await getProcessor()(dm("ok"));
+
+    expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+  });
+
+  const link = { slug: "abc123", label: "Get it", destinationUrl: "https://example.com/offer" };
+
+  it("stops nudging once the link has been sent by DM", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...opening, trackedLinks: [link] }]);
+    await getProcessor()(createMockJob());
+    await getProcessor()(dm("LINK please"));
+    expect(mockSendDirectMessageWithLinkButton).toHaveBeenCalledTimes(1);
+
+    await getProcessor()(dm("ha"));
+
+    expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+  });
+
+  it("stops nudging once the link has been sent as a private reply", async () => {
+    await getProcessor()(createMockJob());
+    mockPrisma.automation.findMany.mockResolvedValue([
+      { ...mockAutomation, id: "auto_790", trackedLinks: [link] },
+    ]);
+    await getProcessor()(createMockJob({ ...mockJobData, commentId: "comment_556" }));
+    expect(mockSendPrivateReplyWithLinkButton).toHaveBeenCalledTimes(1);
+
+    await getProcessor()(dm("ha"));
+
+    expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+  });
+
+  it("keeps the pending button when only a read receipt, not a tap, came in", async () => {
+    mockPrisma.automation.findFirst.mockResolvedValue({ ...opening, requireFollow: true });
+    mockGetUserFollowStatus.mockResolvedValue(false);
+    await getProcessor()(createMockJob());
+    await getProcessor()(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "reveal:auto_789",
+        fallback: true,
+      })
+    );
+
+    await getProcessor()(dm("ha"));
+
+    expect(mockSendDirectMessageWithButton).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a campaign whose keyword matches answer instead of the nudge", async () => {
+    await getProcessor()(createMockJob());
+    mockMatchKeywords.mockReturnValue({ matched: true, matchedKeyword: "ok" });
+
+    await getProcessor()(dm("ok"));
+
+    expect(mockSendDirectMessage).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "commenter_999",
+      "Hey commenter_user! Here is the link: https://example.com"
+    );
+    expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+  });
+
+  it("lets a match-any-word DM campaign keep answering every DM", async () => {
+    await getProcessor()(createMockJob());
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...opening, matchAnyWord: true }]);
+
+    await getProcessor()(dm("ha"));
+
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+  });
+
+  it("records every successful send's Meta message id as bot-sent for 24 hours", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(5_000_000);
+    try {
+      await getProcessor()(createMockJob()); // opening DM, msg_003
+      await getProcessor()(dm("ha")); // nudge, msg_004
+
+      for (const id of ["msg_003", "msg_004"]) {
+        expect(redis.store.get(`bot_sent:${id}`)?.expiresAt).toBe(5_000_000 + 86_400_000);
+      }
+      expect(redis.store.get("pending_button:ig_456:commenter_999")?.expiresAt).toBe(
+        5_000_000 + 86_400_000
+      );
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("records a hash of follower, text and minute when Meta returns no message id", async () => {
+    mockSendPrivateReplyWithButton.mockResolvedValue({ recipient_id: "commenter_999" });
+
+    await getProcessor()(createMockJob());
+
+    const botSent = [...redis.store.keys()].filter((key) => key.startsWith("bot_sent:"));
+    expect(botSent).toHaveLength(1);
+    expect(botSent[0]).toMatch(/^bot_sent:h:[0-9a-f]{64}$/);
+  });
+
+  it("still delivers and finishes the job when Redis rejects every write", async () => {
+    redis.set.mockRejectedValue(new Error("READONLY"));
+    redis.del.mockRejectedValue(new Error("READONLY"));
+
+    await expect(getProcessor()(createMockJob())).resolves.toBeUndefined();
+
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "SENT" }) })
+    );
+  });
+
+  it("leaves Zernio accounts untracked and never nudges them", async () => {
+    const zernio = {
+      ...opening,
+      instagramAccount: {
+        ...opening.instagramAccount,
+        provider: "ZERNIO",
+        workspaceId: "workspace_123",
+        zernioAccountId: "zernio_selected",
+        accessToken: "",
+      },
+    };
+    mockPrisma.zernioConnection.findUnique.mockResolvedValue({ apiKey: "encrypted_key" });
+    mockPrisma.automation.findMany.mockResolvedValue([zernio]);
+    mockPrisma.automation.findFirst.mockResolvedValue(zernio);
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(async () => new Response(JSON.stringify({ messageId: "sent" })));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await getProcessor()(createMockJob());
+      await getProcessor()(dm("ha"));
+
+      expect(fetchMock).toHaveBeenCalledTimes(1); // the opening DM only
+      expect(redis.store.size).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not resend a button whose campaign has since been switched off", async () => {
+    await getProcessor()(createMockJob());
+    mockPrisma.automation.findFirst.mockResolvedValue(null);
+
+    await getProcessor()(dm("ha"));
+
+    expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing to a follower with no pending button", async () => {
+    await getProcessor()(dm("ha"));
+
+    expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("nudges a follower at most once a minute", async () => {
+    const now = vi.spyOn(Date, "now");
+    try {
+      now.mockReturnValue(1_000_000);
+      await getProcessor()(createMockJob());
+      await getProcessor()(dm("+", "mid_1"));
+      await getProcessor()(dm("+", "mid_2"));
+      expect(mockSendDirectMessageWithButton).toHaveBeenCalledTimes(1);
+
+      now.mockReturnValue(1_000_000 + 61_000);
+      await getProcessor()(dm("+", "mid_3"));
+      expect(mockSendDirectMessageWithButton).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+    }
+  });
+});
+
 it("retains the public reply claim if sending succeeded but its log write failed", async () => {
   const { sendCommentReply } = await import("@/lib/meta/client");
   vi.mocked(sendCommentReply).mockResolvedValue({ id: "public-reply" });
