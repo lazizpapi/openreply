@@ -49,6 +49,15 @@ export function countAiAnswersToday(instagramAccountId: string, now = new Date()
   });
 }
 
+/** The campaigns the system prompt lists: live, with the DM trigger on. */
+export function liveDmCampaigns(instagramAccountId: string) {
+  return prisma.automation.findMany({
+    where: { instagramAccountId, isActive: true, dmTriggerEnabled: true },
+    select: { name: true, keywords: true },
+    orderBy: { createdAt: "asc" },
+  });
+}
+
 /**
  * Entry point, called by the message job when no campaign matched and no nudge
  * was sent. Stores the DM and queues the answer for 10 seconds later.
@@ -141,13 +150,8 @@ export async function processAiReply(job: AiReplyJob): Promise<void> {
       return;
     }
 
-    const campaigns = await prisma.automation.findMany({
-      where: { instagramAccountId: account.id, isActive: true, dmTriggerEnabled: true },
-      select: { name: true, keywords: true },
-      orderBy: { createdAt: "asc" },
-    });
     const answer = await askClaude(
-      buildSystemPrompt(settings.instructions, campaigns),
+      buildSystemPrompt(settings.instructions, await liveDmCampaigns(account.id)),
       toClaudeMessages(chat)
     );
     if (!answer) return;
