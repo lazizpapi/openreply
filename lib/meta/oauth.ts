@@ -5,7 +5,12 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "crypto";
-import { getEncryptionKeyHex, requireEnv } from "@/lib/env";
+import {
+  getEncryptionKeyHex,
+  getMetaGraphApiVersion,
+  isUnifiedLogin,
+  requireEnv,
+} from "@/lib/env";
 
 // Instagram API with Instagram Login authorizes on www.instagram.com. The old
 // api.instagram.com/oauth/authorize host belonged to the retired Basic Display
@@ -88,6 +93,20 @@ export function verifyOAuthState(state: string | null): OAuthStatePayload | null
 }
 
 export function getAuthorizationUrl(redirectUri: string, state: string): string {
+  if (isUnifiedLogin()) {
+    // The login configuration carries the permissions and asset picker, so
+    // there is no scope. INSTAGRAM_APP_ID holds the Meta App ID here.
+    const params = new URLSearchParams({
+      client_id: requireEnv("INSTAGRAM_APP_ID"),
+      config_id: requireEnv("META_LOGIN_CONFIG_ID"),
+      redirect_uri: redirectUri,
+      state,
+      response_type: "code",
+      override_default_response_type: "true",
+    });
+    return `https://www.facebook.com/${getMetaGraphApiVersion()}/dialog/oauth?${params.toString()}`;
+  }
+
   const params = new URLSearchParams({
     client_id: requireEnv("INSTAGRAM_APP_ID"),
     redirect_uri: redirectUri,
@@ -104,6 +123,26 @@ export async function exchangeCodeForToken(
   code: string,
   redirectUri: string
 ): Promise<{ accessToken: string; userId: string }> {
+  if (isUnifiedLogin()) {
+    // Returns a SYSTEM_USER token that never expires and names no Instagram
+    // account; the callback looks the accounts up with it.
+    const url = new URL(
+      `https://graph.facebook.com/${getMetaGraphApiVersion()}/oauth/access_token`
+    );
+    url.searchParams.set("client_id", requireEnv("INSTAGRAM_APP_ID"));
+    url.searchParams.set("client_secret", requireEnv("INSTAGRAM_APP_SECRET"));
+    url.searchParams.set("redirect_uri", redirectUri);
+    url.searchParams.set("code", code);
+    const response = await fetch(url.toString());
+    const data = await response.json();
+    if (!response.ok || !data.access_token) {
+      throw new Error(
+        `Token exchange failed: ${data.error?.message || "no access token returned"}`
+      );
+    }
+    return { accessToken: data.access_token, userId: "" };
+  }
+
   const body = new URLSearchParams({
     client_id: requireEnv("INSTAGRAM_APP_ID"),
     client_secret: requireEnv("INSTAGRAM_APP_SECRET"),

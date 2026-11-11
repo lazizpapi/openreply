@@ -50,6 +50,22 @@ export function getMetaGraphApiVersion(): string {
   return process.env.META_GRAPH_API_VERSION ?? "v25.0";
 }
 
+// Meta apps created from October 2026 offer only Unified login (Facebook Login
+// for Business). Setting its login configuration ID switches OAuth and every
+// Graph call of META accounts to it; unset keeps Instagram login. Optional, so
+// it is not part of the core env validation.
+export function isUnifiedLogin(): boolean {
+  return Boolean(process.env.META_LOGIN_CONFIG_ID);
+}
+
+// Instagram account IDs to connect when Meta hides the account from the login.
+export function getConfiguredInstagramAccountIds(): string[] {
+  return (process.env.META_INSTAGRAM_ACCOUNT_IDS ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+}
+
 /**
  * The public demo, and the only host where sign-in is blocked. This repo is
  * something other people clone and deploy; a self-hoster's own domain must
