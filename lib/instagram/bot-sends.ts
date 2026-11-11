@@ -43,15 +43,27 @@ function write(command: (client: Redis) => Promise<unknown>): Promise<void> {
   }
 }
 
+// The text record is a safety net in case an echo's id differs from the send's message_id.
+const textKey = (instagramAccountId: string, followerId: string, text: string) =>
+  `bot_sent_text:${instagramAccountId}:${followerId}:${createHash("sha256")
+    .update(text.trim().replace(/\s+/g, " "))
+    .digest("hex")}`;
+
 // Marks a message as sent by the bot, so its echo is not mistaken for the owner
 // replying. Without a Meta message id, a hash of follower, text and minute stands in.
-export function recordBotSend(recipientId: string, text: string, messageId?: string) {
+export function recordBotSend(
+  instagramAccountId: string,
+  recipientId: string,
+  text: string,
+  messageId?: string
+) {
   const id =
     messageId ||
     `h:${createHash("sha256")
       .update(JSON.stringify([recipientId, text, Math.floor(Date.now() / 60_000)]))
       .digest("hex")}`;
   write((client) => client.set(`bot_sent:${id}`, "1", "EX", DAY_SECONDS));
+  write((client) => client.set(textKey(instagramAccountId, recipientId, text), "1", "EX", DAY_SECONDS));
 }
 
 export function recordPendingButton(
@@ -76,8 +88,17 @@ export async function getPendingButton(
   return raw ? (JSON.parse(raw) as PendingButton) : null;
 }
 
-export async function isBotSend(messageId: string) {
-  return Boolean(await redis()?.get(`bot_sent:${messageId}`));
+// An echo is the bot's own when its id, or its text to this follower, was recorded.
+export async function isBotSend(
+  instagramAccountId: string,
+  followerId: string,
+  messageId: string,
+  text?: string
+) {
+  const client = redis();
+  if (!client) return false;
+  if (await client.get(`bot_sent:${messageId}`)) return true;
+  return Boolean(text?.trim() && (await client.get(textKey(instagramAccountId, followerId, text))));
 }
 
 // Human takeover: the AI assistant stays silent in this chat for 12 hours.

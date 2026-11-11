@@ -246,6 +246,7 @@ export interface WebhookEchoEvent {
   followerId: string;
   messageId: string;
   isTemplate: boolean;
+  text?: string;
 }
 
 /**
@@ -271,6 +272,7 @@ export function parseEchoEvents(payload: WebhookPayload): WebhookEchoEvent[] {
         followerId,
         messageId: message.mid,
         isTemplate: Boolean(message.attachments?.some((a) => a.type === "template")),
+        text: message.text,
       });
     }
   }

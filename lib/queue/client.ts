@@ -93,6 +93,7 @@ export interface AiEchoJob {
   followerId: string;
   messageId: string;
   isTemplate: boolean;
+  text?: string;
 }
 
 export type DmQueueJob =

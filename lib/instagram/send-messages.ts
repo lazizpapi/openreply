@@ -292,7 +292,7 @@ function track(
   pending?: Omit<PendingButton, "campaignId" | "text"> | "clear"
 ) {
   if (context.provider !== "META") return;
-  recordBotSend(recipientId, text, result.message_id);
+  recordBotSend(instagramAccountId, recipientId, text, result.message_id);
   if (pending === "clear") clearPendingButton(instagramAccountId, recipientId);
   // Campaign payloads are `reveal:<id>[:open]` or `followcheck:<id>[:open]`.
   else if (pending)

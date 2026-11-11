@@ -36,7 +36,8 @@ Implementation notes and deviations (agent, ticket 06):
 **Redis keys added**
 
 - `ai_pause:<instagramId>:<followerId>` = `1`, 12 h TTL. Set by the `ai-echo` job and by the inbox reply route.
-- Read only: `bot_sent:<metaMessageId>` (ticket 04's key), checked by `isBotSend(messageId)`.
+- `bot_sent_text:<instagramId>:<followerId>:<sha256 of the text, trimmed, whitespace collapsed>` = `1`, 24 h. `recordBotSend(instagramAccountId, recipientId, text, messageId?)` writes it beside ticket 04's `bot_sent:<id>` on every tracked send, so each part of a split AI answer gets its own key.
+- `isBotSend(instagramAccountId, followerId, messageId, text?)` checks `bot_sent:<mid>` first, then the text key.
 
 **Where things live**
 
@@ -48,9 +49,13 @@ Implementation notes and deviations (agent, ticket 06):
 **Deviations and choices**
 
 - **A separate read, not one extended call.** The follow gate's request stays byte-for-byte the same, so a field Meta might reject can't change the gate. Cost: one more Graph call per AI answer. A test pins both requests' `fields` under both login modes.
-- **The bot-sent hash fallback is not checked.** The job carries only the message ID, as the spec says, so a bot send that Meta returned without a `message_id` (stored as `bot_sent:h:<hash>`) would pause the AI. Meta returns `message_id` on successful sends, and the bot's sends are tracked with it. Upgrade if an unexpected pause ever shows up: carry the echo's text and timestamp, then check the hash for that minute and the next.
+- **Text-match safety net (follow-up).** The `ai-echo` job also carries the echo's text. An echo counts as the bot's when its mid is in `bot_sent:`, or its text to that follower is in `bot_sent_text:`, or it is a template. Only otherwise does the AI pause. This covers an echo mid that differs from the send's `message_id`, and sends Meta returned without an ID. Ticket 04's minute-hash key is still written, but nothing reads it. Cost: if the owner types, word for word, a text the bot sent that follower in the last 24 hours, it doesn't count as the owner replying.
 - **Inbox reply uses `after()`.** `pauseAi` is a Redis write that isn't awaited. On Vercel, a write still pending when the response goes out can be lost when the function freezes. `after(pauseAi(...))` keeps the function alive until the write lands, without delaying the response or hanging it if Redis is unreachable. The inbox send already goes through the tracked `sendDirectMessage`, so its echo counts as bot-sent, and the route's own pause is what covers the inbox. META accounts only.
 - **`write()` in bot-sends now returns its promise** (it never rejects). The existing recorders still don't return or await it, so the nudge and tracking behave as before.
 - **The unknown-job-name test** used `ai-echo` as its "unknown" name. It now uses `ai-unknown`.
 - **Tests.** The worker seam (`__tests__/dm-worker.test.ts`, "human takeover" block) covers: a human echo pauses for 12 h and expires; the AI's own answer and a campaign DM are not counted (both recorded through the real tracked send); a template echo is not counted; an inbox reply through the real route handler pauses; a failed inbox send does not pause; the owner follows → skipped; `false` or `null` → answered. The webhook seam covers META intake queuing delayed `ai-echo` jobs (text and template echoes), and Zernio intake queuing none.
-- **Not verified live:** what an Instagram echo of a button or generic template looks like (assumed to be `attachments[].type === "template"`; the bot-sent ID check covers these sends anyway), whether the echo `mid` equals the send API's `message_id`, and `is_business_follow_user` under a Unified-login SYSTEM_USER token.
+- **Not verified live:**
+  - what an Instagram echo of a button or generic template looks like (assumed to be `attachments[].type === "template"`; the bot-sent ID check covers these sends anyway)
+  - whether the echo `mid` equals the send API's `message_id` (the text match now covers text sends if it doesn't)
+  - whether a private reply's echo names the same follower ID as the comment's `from.id`, which both records are keyed by
+  - `is_business_follow_user` under a Unified-login SYSTEM_USER token

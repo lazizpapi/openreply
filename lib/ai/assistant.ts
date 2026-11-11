@@ -222,7 +222,8 @@ export async function processAiReply(job: AiReplyJob): Promise<void> {
  */
 export async function processAiEcho(job: AiEchoJob): Promise<void> {
   try {
-    if (job.isTemplate || (await isBotSend(job.messageId))) return;
+    if (job.isTemplate) return;
+    if (await isBotSend(job.instagramAccountId, job.followerId, job.messageId, job.text)) return;
     await pauseAi(job.instagramAccountId, job.followerId);
     log(`Owner replied to ${job.followerId}: paused for 12 hours`);
   } catch (error) {

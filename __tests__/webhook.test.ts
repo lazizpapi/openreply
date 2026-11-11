@@ -569,7 +569,7 @@ describe("webhook intake: echoes of the account's own DMs", () => {
   it("queues an ai-echo job 15 seconds later for each echo on a META account", async () => {
     await processInstagramWebhook({ payload: echoes, provider: "META" });
 
-    const echo = (followerId: string, messageId: string, isTemplate: boolean) => [
+    const echo = (followerId: string, messageId: string, isTemplate: boolean, text?: string) => [
       "ai-echo",
       {
         instagramAccountId: "ig_456",
@@ -577,6 +577,7 @@ describe("webhook intake: echoes of the account's own DMs", () => {
         followerId,
         messageId,
         isTemplate,
+        text,
       },
       expect.objectContaining({
         delay: 15_000,
@@ -585,7 +586,7 @@ describe("webhook intake: echoes of the account's own DMs", () => {
       }),
     ];
     expect(mockQueueAdd.mock.calls).toEqual([
-      echo("follower_1", "mid_owner", false),
+      echo("follower_1", "mid_owner", false, "Salom, o'zim javob beraman"),
       echo("follower_2", "mid_button", true),
     ]);
   });

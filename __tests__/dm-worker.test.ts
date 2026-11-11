@@ -2535,10 +2535,10 @@ describe("DM Worker — AI assistant", () => {
     const HOUR_MS = 60 * 60 * 1000;
 
     // The echo of a message the account sent, 15 seconds after it was sent.
-    function echo(messageId: string, isTemplate = false) {
+    function echo(messageId: string, isTemplate = false, text?: string) {
       return {
         name: "ai-echo",
-        data: { instagramAccountId: "ig_456", followerId: "follower_1", messageId, isTemplate },
+        data: { instagramAccountId: "ig_456", followerId: "follower_1", messageId, isTemplate, text },
         id: `ai_echo_${messageId}`,
         attemptsMade: 0,
       };
@@ -2588,6 +2588,41 @@ describe("DM Worker — AI assistant", () => {
 
       expect(mockAskClaude).toHaveBeenCalledTimes(1);
       expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
+    });
+
+    // Safety net in case Meta's echo id ever differs from the send's message_id.
+    it("recognises its own answer by text when the echo's id is unknown", async () => {
+      await followerWrites("salom", "mid_1");
+      const [sent] = sentTexts();
+      await getProcessor()(echo("mid_unknown", false, `  ${sent.replace(" ", "   ")}\n`));
+      await followerWrites("rahmat", "mid_2");
+
+      expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it("recognises every part of a split answer by text", async () => {
+      const paragraph = (word: string) => Array(100).fill(`${word} gap.`).join(" ");
+      mockAskClaude.mockResolvedValueOnce(
+        answer(`${paragraph("Bir")}\n\n${paragraph("Ikki")}\n\n${paragraph("Uch")}`)
+      );
+
+      await followerWrites("salom", "mid_1");
+      const parts = sentTexts();
+      expect(parts).toHaveLength(3);
+      for (const [n, text] of parts.entries()) {
+        await getProcessor()(echo(`mid_unknown_${n}`, false, text));
+      }
+      await followerWrites("rahmat", "mid_2");
+
+      expect(mockSendDirectMessage).toHaveBeenCalledTimes(4);
+    });
+
+    it("counts an echo with an unknown id and new text as the owner replying", async () => {
+      await followerWrites("salom", "mid_1");
+      await getProcessor()(echo("mid_unknown", false, "Salom! Men o'zim javob beraman."));
+      await followerWrites("rahmat", "mid_2");
+
+      expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
     });
 
     it("does not count a template or button message as the owner replying", async () => {
