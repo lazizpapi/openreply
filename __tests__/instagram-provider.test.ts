@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/db/client", () => ({
   prisma: { zernioConnection: { findUnique: vi.fn() } },
 }));
@@ -11,10 +11,13 @@ import {
   sendDirectMessageWithLinkButton,
   getRecentMediaComments,
   getUserFollowStatus,
+  getUserInfo,
   getUserMedia,
+  sendDirectMessage,
 } from "@/lib/instagram/provider";
 import { zernioRequest } from "@/lib/zernio/client";
 import { RateLimitError, TokenExpiredError } from "@/lib/meta/client";
+import { findInstagramAccounts } from "@/lib/meta/unified-login";
 import { prisma } from "@/lib/db/client";
 const context = {
   provider: "ZERNIO" as const,
@@ -32,6 +35,9 @@ describe("Instagram provider boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
   it("resolves only the selected account workspace credentials", async () => {
     vi.mocked(prisma.zernioConnection.findUnique).mockResolvedValue({
@@ -118,15 +124,62 @@ describe("Instagram provider boundary", () => {
       await getUserFollowStatus({ context, recipientId: "person" })
     ).toBeNull();
   });
-  it("preserves direct Meta requests", async () => {
+  const metaAccount = {
+    provider: "META" as const,
+    workspaceId: "workspace",
+    zernioAccountId: null,
+    instagramId: "17841400000000001",
+    accessToken: "encrypted",
+  };
+  it("preserves direct Meta requests under Instagram login", async () => {
+    const meta = await createInstagramContext(metaAccount);
+    expect(meta).toEqual({
+      provider: "META",
+      accessToken: "decrypted:encrypted",
+      instagramId: "17841400000000001",
+      loginMode: "INSTAGRAM",
+    });
     respond({ data: [{ id: "media" }] });
-    expect(
-      await getUserMedia({
-        context: { provider: "META", accessToken: "meta" },
-        limit: 3,
-      })
-    ).toEqual([{ id: "media" }]);
-    expect(fetchMock.mock.calls[0][0]).toContain("graph.instagram.com");
+    expect(await getUserMedia({ context: meta, limit: 3 })).toEqual([
+      { id: "media" },
+    ]);
+    const url = new URL(fetchMock.mock.calls[0][0]);
+    expect(url.origin + url.pathname).toMatch(
+      /^https:\/\/graph\.instagram\.com\/v[\d.]+\/me\/media$/
+    );
+  });
+  it("addresses the account by ID on graph.facebook.com under Unified login", async () => {
+    vi.stubEnv("META_LOGIN_CONFIG_ID", "cfg");
+    const meta = await createInstagramContext(metaAccount);
+    expect(meta).toMatchObject({
+      instagramId: "17841400000000001",
+      loginMode: "UNIFIED",
+    });
+    respond({ data: [] });
+    await getUserMedia({ context: meta });
+    respond({ id: "17841400000000001", username: "owner" });
+    expect(await getUserInfo({ context: meta })).toMatchObject({
+      id: "17841400000000001",
+      user_id: "17841400000000001",
+    });
+    respond({ message_id: "mid" });
+    await sendDirectMessage({
+      context: meta,
+      instagramAccountId: "17841400000000001",
+      userId: "follower",
+      message: "hi",
+    });
+    const [media, info, send] = fetchMock.mock.calls.map(([u]) => new URL(u));
+    expect(media.origin + media.pathname).toMatch(
+      /^https:\/\/graph\.facebook\.com\/v[\d.]+\/17841400000000001\/media$/
+    );
+    expect(info.origin + info.pathname).toMatch(
+      /^https:\/\/graph\.facebook\.com\/v[\d.]+\/17841400000000001$/
+    );
+    expect(info.searchParams.get("fields")).not.toContain("user_id");
+    expect(send.origin + send.pathname).toMatch(
+      /^https:\/\/graph\.facebook\.com\/v[\d.]+\/17841400000000001\/messages$/
+    );
   });
   it.each([
     [429, RateLimitError],
@@ -269,6 +322,168 @@ it("adds a repeatable idempotency key and stops on an unconfirmed direct send", 
   await expect(sendDirectMessageWithLinkButton(input)).rejects.toBeInstanceOf(
     ZernioDeliveryUnconfirmedError
   );
+});
+
+describe("Unified login account lookup", () => {
+  const TOKEN = "system-user-token";
+  const IDS = {
+    assigned: "17841400000000001",
+    debug: "17841400000000002",
+    business: "17841400000000003",
+    page: "17841400000000004",
+    configured: "17841400000000005",
+  };
+
+  // Answers Graph requests by path suffix; anything unrouted is a Graph error.
+  function graph(routes: Record<string, unknown>) {
+    fetchMock.mockImplementation(async (input: string) => {
+      const { pathname } = new URL(input);
+      const path = Object.keys(routes).find((p) => pathname.endsWith(p));
+      return path
+        ? new Response(JSON.stringify(routes[path]))
+        : new Response(
+            JSON.stringify({ error: { message: "unrouted", code: 100 } }),
+            { status: 400 }
+          );
+    });
+  }
+
+  // Strategies before `first` find nothing; `first` and later ones find their own account.
+  function routesFrom(first: number) {
+    const has = (step: number) => step >= first;
+    return {
+      "/me/assigned_instagram_accounts": {
+        data: has(1) ? [{ id: IDS.assigned, username: "assigned" }] : [],
+      },
+      "/debug_token": {
+        data: {
+          granular_scopes: [
+            { scope: "pages_show_list", target_ids: ["page-asset"] },
+            ...(has(2)
+              ? [{ scope: "instagram_basic", target_ids: [IDS.debug] }]
+              : []),
+          ],
+        },
+      },
+      "/me/businesses": {
+        data: [
+          {
+            id: "business",
+            instagram_accounts: {
+              data: has(3) ? [{ id: IDS.business, username: "business" }] : [],
+            },
+          },
+        ],
+      },
+      "/me/accounts": {
+        data: [
+          has(4)
+            ? {
+                id: "page",
+                instagram_business_account: { id: IDS.page, username: "page" },
+              }
+            : { id: "page" },
+        ],
+      },
+      [`/${IDS.configured}`]: { id: IDS.configured, username: "configured" },
+    };
+  }
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("INSTAGRAM_APP_ID", "app");
+    vi.stubEnv("INSTAGRAM_APP_SECRET", "app-secret");
+    vi.stubEnv("META_INSTAGRAM_ACCOUNT_IDS", IDS.configured);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it.each([
+    [1, [{ id: IDS.assigned, username: "assigned" }]],
+    [2, [{ id: IDS.debug }]],
+    [3, [{ id: IDS.business, username: "business" }]],
+    [4, [{ id: IDS.page, username: "page" }]],
+    [5, [{ id: IDS.configured, username: "configured" }]],
+  ])("stops at strategy %i, the first that finds accounts", async (first, expected) => {
+    graph(routesFrom(first));
+    expect(await findInstagramAccounts(TOKEN)).toEqual(expected);
+  });
+
+  it("connects only configured IDs the token can actually read", async () => {
+    vi.stubEnv("META_INSTAGRAM_ACCOUNT_IDS", ` ${IDS.configured} , 1784typo,`);
+    graph(routesFrom(6));
+    expect(await findInstagramAccounts(TOKEN)).toEqual([
+      { id: IDS.configured, username: "configured" },
+    ]);
+    const verified = fetchMock.mock.calls
+      .map(([url]) => new URL(url))
+      .find((url) => url.pathname.endsWith(`/${IDS.configured}`));
+    expect(verified?.searchParams.get("fields")).toBe("id,username");
+  });
+
+  it("finds nothing when no strategy and no configured ID yields an account", async () => {
+    vi.stubEnv("META_INSTAGRAM_ACCOUNT_IDS", "");
+    graph(routesFrom(6));
+    expect(await findInstagramAccounts(TOKEN)).toEqual([]);
+  });
+
+  it("prefers IG User IDs over 15-digit asset IDs", async () => {
+    graph({
+      ...routesFrom(6),
+      "/me/businesses": {
+        data: [
+          {
+            id: "business",
+            instagram_accounts: {
+              data: [
+                { id: "123456789012345", username: "business" },
+                { id: IDS.business, username: "business" },
+              ],
+            },
+          },
+        ],
+      },
+    });
+    expect(await findInstagramAccounts(TOKEN)).toEqual([
+      { id: IDS.business, username: "business" },
+    ]);
+  });
+
+  it("logs each attempt's count, IDs and usernames but never a token", async () => {
+    vi.stubEnv("META_INSTAGRAM_ACCOUNT_IDS", `1784typo,${IDS.configured}`);
+    // Failures echo the full request URL, query included, like a real fetch.
+    fetchMock.mockImplementation(async (input: string) => {
+      const ok = new URL(input).pathname.endsWith(`/${IDS.configured}`);
+      const response = new Response(
+        JSON.stringify(
+          ok
+            ? { id: IDS.configured, username: "configured" }
+            : { error: { message: "denied", code: 10 } }
+        ),
+        { status: ok ? 200 : 403 }
+      );
+      Object.defineProperty(response, "url", { value: input });
+      return response;
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await findInstagramAccounts(TOKEN);
+
+    const logged = JSON.stringify([...log.mock.calls, ...warn.mock.calls]);
+    expect(logged).not.toContain(TOKEN);
+    expect(logged).not.toContain("app-secret");
+    expect(log).toHaveBeenLastCalledWith("[Unified login] Account lookup", {
+      strategy: "META_INSTAGRAM_ACCOUNT_IDS",
+      count: 1,
+      accounts: [{ id: IDS.configured, username: "configured" }],
+    });
+    expect(log).toHaveBeenCalledTimes(5);
+    log.mockRestore();
+    warn.mockRestore();
+  });
 });
 
 it('treats a lost public-reply response as unconfirmed instead of safe to repeat', async () => {
