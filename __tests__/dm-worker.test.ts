@@ -156,6 +156,7 @@ vi.mock("bullmq", () => {
 
 import { MetaApiError, RateLimitError } from "@/lib/meta/client";
 import { createDMWorker } from "../lib/queue/dm-worker";
+import { deleteExpiredAiMessages } from "@/lib/ai/assistant";
 import { getRedisConnection } from "@/lib/queue/client";
 import { hashRecipientId } from "@/lib/tracking/server";
 
@@ -2388,6 +2389,117 @@ describe("DM Worker — AI assistant", () => {
     expect(mockSendDirectMessage.mock.calls.map((call) => call[2])).toEqual([
       "follower_1",
       "follower_3",
+    ]);
+  });
+
+  it("starts the first answer in 30 days with the bot notice in the follower's language", async () => {
+    mockAskClaude.mockResolvedValue(answer("Здравствуйте!", "ru"));
+    const reply = async (text: string, mid: string) => {
+      await getProcessor()(dm(text, mid));
+      await runAiReplies();
+    };
+
+    await reply("привет", "mid_1");
+    vi.setSystemTime(Date.now() + 60_000);
+    await reply("как дела?", "mid_2");
+    vi.setSystemTime(Date.now() + 31 * 24 * 60 * 60 * 1000);
+    await deleteExpiredAiMessages(); // the worker's periodic loop
+    await reply("снова привет", "mid_3");
+
+    expect(sentTexts()).toEqual([
+      "🤖 Это автоматический ассистент.\nЗдравствуйте!",
+      "Здравствуйте!",
+      "🤖 Это автоматический ассистент.\nЗдравствуйте!",
+    ]);
+  });
+
+  it.each([
+    ["uz-cyrl", "🤖 Бу автоматик ёрдамчи."],
+    ["en", "🤖 This is an automated assistant."],
+    ["other", "🤖 Bu avtomatik yordamchi."],
+  ])("writes the bot notice for %s as %j", async (language, notice) => {
+    mockAskClaude.mockResolvedValue(answer("OK", language));
+
+    await getProcessor()(dm("hi", "mid_1"));
+    await runAiReplies();
+
+    expect(sentTexts()).toEqual([`${notice}\nOK`]);
+  });
+
+  it("strips Markdown and sends a long answer as up to 3 messages, in order", async () => {
+    const paragraph = (word: string) => Array(100).fill(`${word} gap.`).join(" ");
+    mockAskClaude.mockResolvedValue(
+      answer(`**${paragraph("Bir")}**\n\n${paragraph("Ikki")}\n\n${paragraph("Uch")}`)
+    );
+
+    await getProcessor()(dm("salom", "mid_1"));
+    await runAiReplies();
+
+    expect(sentTexts()).toEqual([
+      `🤖 Bu avtomatik yordamchi.\n${paragraph("Bir")}`,
+      paragraph("Ikki"),
+      paragraph("Uch"),
+    ]);
+  });
+
+  it("stops at the first failed part and still counts the answer", async () => {
+    const paragraph = (word: string) => Array(100).fill(`${word} gap.`).join(" ");
+    mockAskClaude.mockResolvedValueOnce(
+      answer(`${paragraph("Bir")}\n\n${paragraph("Ikki")}\n\n${paragraph("Uch")}`)
+    );
+    mockSendDirectMessage
+      .mockResolvedValueOnce({ recipient_id: "follower_1", message_id: "msg_1" })
+      .mockRejectedValueOnce(new Error("Meta send failed"));
+
+    await getProcessor()(dm("salom", "mid_1"));
+    await runAiReplies();
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
+
+    await getProcessor()(dm("rahmat", "mid_2"));
+    await runAiReplies();
+    expect(sentTexts()[2]).toBe("Qo'llanma uchun LINK deb yozing."); // no second bot notice
+  });
+
+  it.each([
+    ["Claude fails, refuses or returns nothing usable", null],
+    ["Claude hands over (ticket 07 adds the handover text)", answer("Egasi javob beradi.", "uz-latn", true)],
+    ["the reply is empty", answer(" \n ")],
+  ])("stays silent when %s", async (_case, result) => {
+    mockAskClaude.mockResolvedValue(result);
+
+    await getProcessor()(dm("salom", "mid_1"));
+    await runAiReplies();
+
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("never fails the message job when the AI step fails", async () => {
+    mockPrisma.aiMessage.createMany.mockRejectedValue(new Error("relation does not exist"));
+
+    await expect(getProcessor()(dm("salom", "mid_1"))).resolves.toBeUndefined();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+
+  it("sends Claude the last 10 AI messages, oldest first, starting with the follower's", async () => {
+    for (let n = 1; n <= 6; n++) {
+      mockAskClaude.mockResolvedValueOnce(answer(`javob ${n}`));
+      await getProcessor()(dm(`savol ${n}`, `mid_${n}`));
+      await runAiReplies();
+      vi.setSystemTime(Date.now() + 60_000);
+    }
+    await getProcessor()(dm("savol 7", "mid_7"));
+    await runAiReplies();
+
+    expect(mockAskClaude.mock.calls[6][1]).toEqual([
+      { role: "user", content: "savol 3" },
+      { role: "assistant", content: "javob 3" },
+      { role: "user", content: "savol 4" },
+      { role: "assistant", content: "javob 4" },
+      { role: "user", content: "savol 5" },
+      { role: "assistant", content: "javob 5" },
+      { role: "user", content: "savol 6" },
+      { role: "assistant", content: "javob 6" },
+      { role: "user", content: "savol 7" },
     ]);
   });
 
