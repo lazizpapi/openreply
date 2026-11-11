@@ -26,17 +26,20 @@ function redis(): Redis | null {
   return process.env.REDIS_URL ? getRedisConnection() : null;
 }
 
-// Fire-and-forget, so an unreachable Redis (ioredis queues commands while
-// offline) cannot hold up the caller.
-function write(command: (client: Redis) => Promise<unknown>) {
+function warn(error: unknown) {
+  console.warn("[Bot sends] Redis write failed:", error instanceof Error ? error.message : error);
+}
+
+// Callers don't await this, so an unreachable Redis (ioredis queues commands
+// while offline) cannot hold them up. The promise never rejects.
+function write(command: (client: Redis) => Promise<unknown>): Promise<void> {
   try {
     const client = redis();
-    if (!client) return;
-    command(client).catch((error: unknown) =>
-      console.warn("[Bot sends] Redis write failed:", error instanceof Error ? error.message : error)
-    );
+    if (!client) return Promise.resolve();
+    return command(client).then(() => undefined, warn);
   } catch (error) {
-    console.warn("[Bot sends] Redis write failed:", error instanceof Error ? error.message : error);
+    warn(error);
+    return Promise.resolve();
   }
 }
 
@@ -81,8 +84,10 @@ export async function isBotSend(messageId: string) {
 const pauseKey = (instagramAccountId: string, followerId: string) =>
   `ai_pause:${instagramAccountId}:${followerId}`;
 
+// Returns the write, for a web route to hand to after(): a serverless function
+// can be frozen before an unawaited write goes out.
 export function pauseAi(instagramAccountId: string, followerId: string) {
-  write((client) => client.set(pauseKey(instagramAccountId, followerId), "1", "EX", 12 * 60 * 60));
+  return write((client) => client.set(pauseKey(instagramAccountId, followerId), "1", "EX", 12 * 60 * 60));
 }
 
 export async function isAiPaused(instagramAccountId: string, followerId: string) {

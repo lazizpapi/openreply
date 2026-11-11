@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { getCurrentWorkspaceId } from "@/lib/auth";
 import { getWorkspaceInstagramAccount } from "@/lib/instagram-accounts";
 import {
@@ -7,6 +7,7 @@ import {
   MetaApiError,
 } from "@/lib/instagram/provider";
 import { createInstagramContext } from "@/lib/instagram/provider";
+import { pauseAi } from "@/lib/instagram/bot-sends";
 
 export interface ConversationListItem {
   id: string;
@@ -150,6 +151,8 @@ export async function POST(request: NextRequest) {
       userId: body.recipientId,
       message: text,
     });
+    // Human takeover: the owner replied personally, so the AI stays out of this chat.
+    if (accessToken.provider === "META") after(pauseAi(account.instagramId, body.recipientId));
     return NextResponse.json({ success: true, data: result });
   } catch (err) {
     console.error("[Conversations] Send error:", err);

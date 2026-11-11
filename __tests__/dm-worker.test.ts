@@ -18,6 +18,8 @@ const {
   mockReserveWorkspaceDMSend,
   mockReleaseWorkspaceDMReservation,
   mockAskClaude,
+  mockGetWorkspaceInstagramAccount,
+  afterTasks,
 } = vi.hoisted(() => ({
   mockPrisma: {
     // In-memory AiMessage table; see createAiMessageTable below.
@@ -65,6 +67,8 @@ const {
   mockReserveWorkspaceDMSend: vi.fn(),
   mockReleaseWorkspaceDMReservation: vi.fn(),
   mockAskClaude: vi.fn(),
+  mockGetWorkspaceInstagramAccount: vi.fn(),
+  afterTasks: [] as unknown[],
 }));
 
 // The Claude call is mocked at the AI provider boundary; the prompt builder is real.
@@ -75,6 +79,17 @@ vi.mock("@/lib/ai/provider", async (importOriginal) => ({
 
 vi.mock("@/lib/db/client", () => ({
   prisma: mockPrisma,
+}));
+
+// For the inbox reply route, which the human takeover tests call.
+vi.mock("@/lib/auth", () => ({ getCurrentWorkspaceId: async () => "workspace_123" }));
+vi.mock("@/lib/instagram-accounts", () => ({
+  getWorkspaceInstagramAccount: mockGetWorkspaceInstagramAccount,
+}));
+// The real after() needs a request scope; collect its tasks to run once the response is out.
+vi.mock("next/server", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("next/server")>()),
+  after: (task: unknown) => afterTasks.push(typeof task === "function" ? task() : task),
 }));
 
 vi.mock("@/lib/meta/client", () => ({
@@ -161,6 +176,7 @@ vi.mock("bullmq", () => {
 import { MetaApiError, RateLimitError } from "@/lib/meta/client";
 import { createDMWorker } from "../lib/queue/dm-worker";
 import { deleteExpiredAiMessages } from "@/lib/ai/assistant";
+import { POST as inboxReply } from "@/app/api/instagram/conversations/route";
 import { getRedisConnection } from "@/lib/queue/client";
 import { hashRecipientId } from "@/lib/tracking/server";
 
@@ -2579,6 +2595,38 @@ describe("DM Worker — AI assistant", () => {
       await followerWrites("salom", "mid_1");
 
       expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    });
+
+    async function replyFromInbox(text: string) {
+      const response = await inboxReply(
+        new Request("http://localhost/api/instagram/conversations", {
+          method: "POST",
+          body: JSON.stringify({ instagramAccountId: account.id, recipientId: "follower_1", text }),
+        }) as never
+      );
+      await Promise.all(afterTasks.splice(0));
+      return response;
+    }
+
+    it("stays silent in the chat for 12 hours after the owner replies from OpenReply's inbox", async () => {
+      mockGetWorkspaceInstagramAccount.mockResolvedValue(account);
+
+      expect((await replyFromInbox("Salom, men Lazizbek")).status).toBe(200);
+      await followerWrites("salom", "mid_1");
+      expect(sentTexts()).toEqual(["Salom, men Lazizbek"]);
+
+      vi.setSystemTime(Date.now() + 12 * HOUR_MS);
+      await followerWrites("yana savol", "mid_2");
+      expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps answering when the inbox reply fails to send", async () => {
+      mockGetWorkspaceInstagramAccount.mockResolvedValue(account);
+      mockSendDirectMessage.mockRejectedValueOnce(new Error("Meta send failed"));
+
+      expect((await replyFromInbox("Salom")).status).toBe(502);
+      await followerWrites("salom", "mid_1");
+      expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
     });
   });
 
