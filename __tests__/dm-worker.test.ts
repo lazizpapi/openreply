@@ -2209,4 +2209,192 @@ describe("DM Worker — AI assistant", () => {
     expect(system).toContain("approved an exception");
     expect(messages).toEqual([{ role: "user", content: "qo'llanma qayerda?" }]);
   });
+
+  it("lets a matching campaign answer instead of the AI", async () => {
+    mockMatchKeywords.mockReturnValue({ matched: true, matchedKeyword: "LINK" });
+
+    await getProcessor()(dm("LINK", "mid_1"));
+    await runAiReplies();
+
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sentTexts()[0]).toContain("Here is the link");
+    expect(mockAskClaude).not.toHaveBeenCalled();
+    expect(aiRows).toHaveLength(0);
+  });
+
+  it("lets a nudge answer a yes-word instead of the AI", async () => {
+    const redis = createFakeRedis();
+    vi.stubEnv("REDIS_URL", "redis://fake");
+    vi.mocked(getRedisConnection).mockReturnValue(redis as never);
+    redis.store.set("pending_button:ig_456:follower_1", {
+      value: JSON.stringify({
+        campaignId: "auto_789",
+        text: "Tap below",
+        buttonTitle: "Send it",
+        payload: "reveal:auto_789:open",
+        via: "dm",
+      }),
+      expiresAt: Date.now() + 60_000,
+    });
+    mockPrisma.automation.findFirst.mockResolvedValue(campaign);
+
+    await getProcessor()(dm("ha", "mid_1"));
+    await runAiReplies();
+
+    expect(mockSendDirectMessageWithButton).toHaveBeenCalledTimes(1);
+    expect(mockAskClaude).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("answers a yes-word when there is no pending button", async () => {
+    await getProcessor()(dm("ha", "mid_1"));
+    await runAiReplies();
+
+    expect(mockAskClaude).toHaveBeenCalledTimes(1);
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing AI-related without ANTHROPIC_API_KEY", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+
+    await getProcessor()(dm("salom", "mid_1"));
+    await getProcessor()({
+      name: "ai-reply",
+      data: { instagramAccountId: "ig_456", followerId: "follower_1", messageId: "mid_1" },
+      id: "ai_reply_job",
+      attemptsMade: 0,
+    });
+
+    expect(mockPrisma.aiMessage.createMany).not.toHaveBeenCalled();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+    expect(mockAskClaude).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["the AI settings are off", { ...account, aiSettings: { ...account.aiSettings, enabled: false } }],
+    ["the account has no AI settings", { ...account, aiSettings: null }],
+    ["the account is a Zernio account", { ...account, provider: "ZERNIO" }],
+  ])("stays out of the chat when %s", async (_case, setup) => {
+    mockPrisma.instagramAccount.findUnique.mockResolvedValue(setup);
+
+    await getProcessor()(dm("salom", "mid_1"));
+    await runAiReplies();
+
+    expect(aiRows).toHaveLength(0);
+    expect(mockAskClaude).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("answers only the last of several messages, with all of them", async () => {
+    await getProcessor()(dm("salom", "mid_1"));
+    vi.setSystemTime(Date.now() + 3_000);
+    await getProcessor()(dm("savolim bor", "mid_2"));
+    vi.setSystemTime(Date.now() + 3_000);
+    await getProcessor()(dm("qo'llanma qayerda?", "mid_3"));
+
+    await runAiReplies();
+
+    expect(mockAskClaude).toHaveBeenCalledTimes(1);
+    expect(mockAskClaude.mock.calls[0][1]).toEqual([
+      { role: "user", content: "salom" },
+      { role: "user", content: "savolim bor" },
+      { role: "user", content: "qo'llanma qayerda?" },
+    ]);
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a duplicate webhook for the same message as a no-op", async () => {
+    await getProcessor()(dm("salom", "mid_1"));
+    await getProcessor()(dm("salom", "mid_1"));
+
+    expect(aiRows).toHaveLength(1);
+    expect(mockQueueAdd).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers a message once even when its job runs twice", async () => {
+    await getProcessor()(dm("salom", "mid_1"));
+    const [[name, data, options]] = mockQueueAdd.mock.calls;
+    vi.setSystemTime(Date.now() + 10_000);
+    const job = { name, data, id: options.jobId, attemptsMade: 0 };
+
+    await getProcessor()(job);
+    await getProcessor()(job);
+
+    expect(mockAskClaude).toHaveBeenCalledTimes(1);
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers a DM that arrives while Claude is answering the previous one", async () => {
+    await getProcessor()(dm("salom", "mid_1"));
+    mockAskClaude.mockImplementationOnce(async () => {
+      vi.setSystemTime(Date.now() + 2_000);
+      await getProcessor()(dm("narxi qancha?", "mid_2"));
+      return answer("Salom!");
+    });
+
+    await runAiReplies(); // answers mid_1, queues mid_2
+    await runAiReplies(); // answers mid_2
+
+    expect(mockAskClaude).toHaveBeenCalledTimes(2);
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("stays silent once the messaging window has closed", async () => {
+    await getProcessor()(dm("salom", "mid_1"));
+    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000); // the worker was down for a day
+
+    await runAiReplies();
+
+    expect(mockAskClaude).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("stays silent at the daily AI limit, counting one answer once however many parts it had", async () => {
+    mockPrisma.instagramAccount.findUnique.mockResolvedValue({
+      ...account,
+      aiSettings: { ...account.aiSettings, dailyLimit: 2 },
+    });
+    mockAskClaude.mockResolvedValue(answer(Array(150).fill("Bu javob.").join(" "))); // 2 parts
+
+    for (const follower of ["follower_1", "follower_2", "follower_3"]) {
+      await getProcessor()(dm("salom", `mid_${follower}`, follower));
+      await runAiReplies();
+    }
+
+    expect(mockSendDirectMessage.mock.calls.map((call) => call[2])).toEqual([
+      "follower_1",
+      "follower_1",
+      "follower_2",
+      "follower_2",
+    ]);
+  });
+
+  it("starts the daily AI limit's day at 00:00 Tashkent time", async () => {
+    mockPrisma.instagramAccount.findUnique.mockResolvedValue({
+      ...account,
+      aiSettings: { ...account.aiSettings, dailyLimit: 1 },
+    });
+    const answerAt = async (utc: string, follower: string) => {
+      vi.setSystemTime(new Date(utc));
+      await getProcessor()(dm("salom", `mid_${follower}`, follower));
+      await runAiReplies();
+    };
+
+    await answerAt("2026-11-11T18:58:00Z", "follower_1"); // 23:58 in Tashkent
+    await answerAt("2026-11-11T18:59:00Z", "follower_2"); // 23:59, same day: limit reached
+    await answerAt("2026-11-11T19:00:00Z", "follower_3"); // 00:00:10 the next day
+
+    expect(mockSendDirectMessage.mock.calls.map((call) => call[2])).toEqual([
+      "follower_1",
+      "follower_3",
+    ]);
+  });
+
+  it("never hands a job with an unknown name to the comment handler", async () => {
+    await getProcessor()({ name: "ai-echo", data: mockJobData, id: "echo_job", attemptsMade: 0 });
+
+    expect(mockPrisma.automation.findMany).not.toHaveBeenCalled();
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+  });
 });

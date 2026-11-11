@@ -67,6 +67,15 @@ describe("splitReply", () => {
     expect(bytes(parts[0])).toBeLessThanOrEqual(1000);
   });
 
+  it("treats a single line break as a sentence break, so the bot notice line is not sent alone", () => {
+    const text = `🤖 Bu avtomatik yordamchi.\n${Array(150).fill("Bu javob.").join(" ")}`;
+
+    const parts = splitReply(text);
+
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toMatch(/^🤖 Bu avtomatik yordamchi\.\nBu javob\. Bu javob\./);
+  });
+
   it("sends at most 3 messages and ends a cut third one with …", () => {
     const text = Array(1000).fill("ёрдамчи").join(" "); // about 14 KB
 

@@ -46,11 +46,13 @@ function segmentEnds(text: string, granularity: "sentence" | "word" | "grapheme"
   );
 }
 
-const lineEnds = (text: string) => Array.from(text.matchAll(/\n/g), (match) => match.index + 1);
+// A paragraph ends at a blank line; a single line break is a sentence break.
+const paragraphEnds = (text: string) =>
+  Array.from(text.matchAll(/\n[ \t]*\n/g), (match) => match.index + match[0].length);
 const sentenceEnds = (text: string) => segmentEnds(text, "sentence");
 const wordEnds = (text: string) => segmentEnds(text, "word");
 const graphemeEnds = (text: string) => segmentEnds(text, "grapheme");
-const BREAKS = [lineEnds, sentenceEnds, wordEnds, graphemeEnds];
+const BREAKS = [paragraphEnds, sentenceEnds, wordEnds, graphemeEnds];
 
 // The longest prefix of `text` within `limit` bytes that ends at the best kind
 // of break: paragraph, then sentence, then word, then grapheme.
