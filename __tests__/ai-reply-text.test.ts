@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitReply, stripMarkdown } from "@/lib/ai/reply-text";
+import { hasOnlyKnownLinks, splitReply, stripMarkdown } from "@/lib/ai/reply-text";
 
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 
@@ -108,5 +108,40 @@ describe("stripMarkdown", () => {
     "Salom 👋 Qo'llanma tayyor!",
   ])("leaves plain text %j alone", (text) => {
     expect(stripMarkdown(text)).toBe(text);
+  });
+});
+
+describe("hasOnlyKnownLinks", () => {
+  const instructions =
+    "Telegram kanalim: https://t.me/lazizpapi\nSayt: lazizpapi.uz/kurs\nEmail: info@lazizpapi.uz";
+
+  it.each([
+    "Salom! Qoʻllanma uchun LINK deb yozing.",
+    "Telegram kanalim: https://t.me/lazizpapi",
+    "Kanalga qoʻshiling: https://t.me/lazizpapi.",
+    "(https://t.me/lazizpapi) orqali yozing!",
+    "Batafsil: lazizpapi.uz/kurs",
+    "Yozing: info@lazizpapi.uz",
+    "Narxi 200.000 soʻm, 3.5 soat.",
+    "Instagram: @lazizbek_papi_uz",
+  ])("passes %j", (reply) => {
+    expect(hasOnlyKnownLinks(reply, instructions)).toBe(true);
+  });
+
+  it.each([
+    "Qoʻllanma: https://drive.google.com/file/d/abc",
+    "Kanal: https://t.me/lazizpapi_bot",
+    "Kanal: http://t.me/lazizpapi",
+    "Kurs: www.lazizpapi.uz/pro",
+    "Kurs: lazizpapi.uz/pro",
+    "Botga yozing: t.me/lazizpapi_bot",
+    "Yozing: sales@lazizpapi.uz",
+    "Saytimiz: openreply.app",
+  ])("refuses %j", (reply) => {
+    expect(hasOnlyKnownLinks(reply, instructions)).toBe(false);
+  });
+
+  it("refuses any link when the AI instructions have none", () => {
+    expect(hasOnlyKnownLinks("Mana: https://t.me/lazizpapi", "")).toBe(false);
   });
 });

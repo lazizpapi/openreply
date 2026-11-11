@@ -262,13 +262,30 @@ describe("POST /api/ai/try", () => {
     expectNothingSentOrStored();
   });
 
-  it("marks a handover", async () => {
-    mockAskClaude.mockResolvedValue({ reply: "Bu haqda oʻzim yozaman.", handover: true, language: "uz-latn" });
+  it("shows a handover as the fixed handover text the follower would get", async () => {
+    mockAskClaude.mockResolvedValue({ reply: "Bilmayman.", handover: true, language: "ru" });
 
     const { body: result } = await read(await tryIt(body));
 
-    expect(result).toEqual({ success: true, data: { reply: "Bu haqda oʻzim yozaman.", handover: true } });
+    expect(result).toEqual({ success: true, data: { reply: "Скоро отвечу на это лично.", handover: true } });
     expectNothingSentOrStored();
+  });
+
+  it("hands over on a link that is not in the typed AI instructions", async () => {
+    const typed = { ...body, instructions: `${body.instructions}\nTelegram: https://t.me/lazizpapi` };
+    const tryReply = async (reply: string) => {
+      mockAskClaude.mockResolvedValueOnce({ reply, handover: false, language: "uz-latn" });
+      return (await read(await tryIt(typed))).body.data;
+    };
+
+    expect(await tryReply("Kanal: https://t.me/lazizpapi")).toEqual({
+      reply: "Kanal: https://t.me/lazizpapi",
+      handover: false,
+    });
+    expect(await tryReply("Kanal: https://t.me/boshqa_kanal")).toEqual({
+      reply: "Bunga tez orada oʻzim javob beraman.",
+      handover: true,
+    });
   });
 
   it("says clearly when Claude gives no answer", async () => {
