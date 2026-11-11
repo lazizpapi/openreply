@@ -7,10 +7,12 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { AiMessage } from "@/app/generated/prisma/client";
 import { prisma } from "@/lib/db/client";
+import { sendOwnerEmail } from "@/lib/email/owner-email";
 import { isAiPaused, isBotSend, pauseAi } from "@/lib/instagram/bot-sends";
 import {
   createInstagramContext,
   getBusinessFollowsUser,
+  resolveRecipientName,
   sendDirectMessage,
   type InstagramContext,
 } from "@/lib/instagram/provider";
@@ -22,7 +24,7 @@ import {
   type ProcessMessageJob,
 } from "@/lib/queue/client";
 import { askClaude, buildSystemPrompt, isAiConfigured } from "./provider";
-import { botNotice, splitReply, stripMarkdown } from "./reply-text";
+import { botNotice, shapeAnswer, splitReply } from "./reply-text";
 
 const REPLY_DELAY_MS = 10_000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -167,12 +169,7 @@ export async function processAiReply(job: AiReplyJob): Promise<void> {
       toClaudeMessages(chat)
     );
     if (!answer) return;
-    // Ticket 07: a handover sends the handover text, pauses the chat and emails the owner.
-    if (answer.handover) {
-      log(`Handover on ${job.messageId}: staying silent`);
-      return;
-    }
-    const reply = stripMarkdown(answer.reply).trim();
+    const { reply, handover } = shapeAnswer(answer, settings.instructions);
     if (!reply) {
       log(`No answer to ${job.messageId}: empty reply`);
       return;
@@ -210,8 +207,51 @@ export async function processAiReply(job: AiReplyJob): Promise<void> {
         createdAt: now,
       },
     });
+    if (handover) await handOver(job, account, context, chat[0].text);
   } catch (error) {
     log(`Answer to ${job.messageId} failed:`, error);
+  }
+}
+
+/**
+ * After the handover text went out: the chat pauses for 12 hours and the owner
+ * gets an email. A paused chat never hands over again, so that is at most one
+ * email per follower per 12 hours.
+ */
+async function handOver(
+  job: AiReplyJob,
+  account: { workspaceId: string; username: string },
+  context: InstagramContext,
+  lastMessage: string
+): Promise<void> {
+  await pauseAi(job.instagramAccountId, job.followerId);
+  log(`Handover on ${job.messageId}: paused for 12 hours`);
+  try {
+    const workspace = await prisma.workspace.findUnique({
+      where: { id: account.workspaceId },
+      select: { owner: { select: { email: true } } },
+    });
+    if (!workspace?.owner.email) return;
+    const name = await resolveRecipientName({
+      context,
+      workspaceId: account.workspaceId,
+      recipientId: job.followerId,
+    });
+    const follower = name ? `@${name}` : `follower ${job.followerId}`;
+    await sendOwnerEmail(
+      workspace.owner.email,
+      `${follower} is waiting for your reply on Instagram`,
+      [
+        `The AI assistant on @${account.username} was not sure how to answer ${follower}, so it told them you will reply yourself.`,
+        "",
+        "Their last message:",
+        lastMessage,
+        "",
+        "The AI assistant stays silent in this chat for 12 hours. Reply from the Instagram app or the OpenReply inbox.",
+      ].join("\n")
+    );
+  } catch (error) {
+    log(`Handover email for ${job.messageId} not sent:`, error);
   }
 }
 
