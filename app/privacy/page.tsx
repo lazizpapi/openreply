@@ -12,7 +12,7 @@ export default function PrivacyPage() {
     <LegalShell
       title="Privacy Policy"
       description="OpenReply helps businesses send Meta-compliant private replies when people comment on connected Instagram posts or reels."
-      updatedAt="May 24, 2026"
+      updatedAt="November 11, 2026"
     >
       <section>
         <h2 className="text-xl font-bold text-white">Data We Collect</h2>
@@ -52,6 +52,11 @@ export default function PrivacyPage() {
           and observability providers such as Vercel, Railway, PostgreSQL,
           Redis, and Resend. These providers process data only as needed to run
           the service.
+        </p>
+        <p className="mt-3">
+          Direct messages that match no campaign may be processed by an AI
+          provider (Anthropic) to draft automatic replies, and are kept for up
+          to 30 days.
         </p>
       </section>
 

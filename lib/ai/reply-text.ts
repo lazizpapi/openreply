@@ -2,7 +2,7 @@
  * Pure text shaping for AI replies: Markdown stripping, the bot notice, and
  * splitting to Instagram's per-message limit.
  */
-import type { AiLanguage } from "./provider";
+import type { AiAnswer, AiLanguage } from "./provider";
 
 const BOT_NOTICES: Record<AiLanguage, string> = {
   "uz-latn": "🤖 Bu avtomatik yordamchi.",
@@ -35,6 +35,15 @@ export function stripMarkdown(text: string): string {
     .replace(/(?<!\w)__(?=\S)(.+?)(?<=\S)__(?!\w)/g, "$1")
     .replace(/(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])/g, "$1")
     .replace(/`+/g, "");
+}
+
+/**
+ * The reply text Claude's answer turns into, before the bot notice and
+ * splitting. Used by the Settings "Try it" box. Ticket 07: the link guard and
+ * the fixed handover text go here, and the worker should call this too.
+ */
+export function shapeAnswer(answer: AiAnswer): { reply: string; handover: boolean } {
+  return { reply: stripMarkdown(answer.reply).trim(), handover: answer.handover };
 }
 
 const byteLength = (text: string) => Buffer.byteLength(text, "utf8");
