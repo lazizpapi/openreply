@@ -8,22 +8,25 @@ export class ConnectionError extends Error {
   constructor(message: string, public status = 400) { super(message); }
 }
 
+/** Refuses a cross-site write. Throws a 403 ConnectionError. */
+export function assertSameOrigin(request: Request) {
+  const origin = request.headers.get('origin');
+  // Behind a TLS-terminating proxy request.url is http://, so also accept the public NEXTAUTH_URL origin.
+  const allowed = [new URL(request.url).origin];
+  if (process.env.NEXTAUTH_URL) allowed.push(new URL(process.env.NEXTAUTH_URL).origin);
+  // Also accept the proxy's forwarded host, e.g. Coolify/Traefik behind Cloudflare.
+  const forwardedHost = request.headers.get('x-forwarded-host');
+  if (forwardedHost) allowed.push(`${request.headers.get('x-forwarded-proto') ?? 'https'}://${forwardedHost}`);
+  if (origin && !allowed.includes(origin)) throw new ConnectionError('Invalid request origin.', 403);
+}
+
 export function withZernioManagement(handler: (context: WorkspaceContext, request: Request) => Promise<Response>) {
   return async (request: Request) => {
     try {
       const context = await getCurrentWorkspaceContext();
       if (!context) throw new ConnectionError('Sign in to manage your connection.', 401);
       if (!canManageWorkspace(context.role)) throw new ConnectionError('Only workspace owners and admins can manage the Zernio connection.', 403);
-      if (request.method !== 'GET') {
-        const origin = request.headers.get('origin');
-        // Behind a TLS-terminating proxy request.url is http://, so also accept the public NEXTAUTH_URL origin.
-        const allowed = [new URL(request.url).origin];
-        if (process.env.NEXTAUTH_URL) allowed.push(new URL(process.env.NEXTAUTH_URL).origin);
-        // Also accept the proxy's forwarded host, e.g. Coolify/Traefik behind Cloudflare.
-        const forwardedHost = request.headers.get('x-forwarded-host');
-        if (forwardedHost) allowed.push(`${request.headers.get('x-forwarded-proto') ?? 'https'}://${forwardedHost}`);
-        if (origin && !allowed.includes(origin)) throw new ConnectionError('Invalid request origin.', 403);
-      }
+      if (request.method !== 'GET') assertSameOrigin(request);
       return await handler(context, request);
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return NextResponse.json({ success: false, error: 'This connection was already added. Refresh and try again.' }, { status: 409 });
