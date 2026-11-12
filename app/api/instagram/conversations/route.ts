@@ -124,8 +124,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const { recipientId } = body;
   const text = body.text?.trim();
-  if (!body.recipientId || !text) {
+  if (!recipientId || !text) {
     return NextResponse.json(
       { success: false, error: "A recipient and message are required." },
       { status: 400 }
@@ -148,11 +149,11 @@ export async function POST(request: NextRequest) {
     const result = await sendDirectMessage({
       context: accessToken,
       instagramAccountId: account.instagramId,
-      userId: body.recipientId,
+      userId: recipientId,
       message: text,
     });
     // Human takeover: the owner replied personally, so the AI stays out of this chat.
-    if (accessToken.provider === "META") after(pauseAi(account.instagramId, body.recipientId));
+    if (accessToken.provider === "META") after(() => pauseAi(account.instagramId, recipientId));
     return NextResponse.json({ success: true, data: result });
   } catch (err) {
     console.error("[Conversations] Send error:", err);

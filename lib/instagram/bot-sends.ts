@@ -105,8 +105,8 @@ export async function isBotSend(
 const pauseKey = (instagramAccountId: string, followerId: string) =>
   `ai_pause:${instagramAccountId}:${followerId}`;
 
-// Returns the write, for a web route to hand to after(): a serverless function
-// can be frozen before an unawaited write goes out.
+// Returns the write, for a web route's after() callback to return: a serverless
+// function can be frozen before an unawaited write goes out.
 export function pauseAi(instagramAccountId: string, followerId: string) {
   return write((client) => client.set(pauseKey(instagramAccountId, followerId), "1", "EX", 12 * 60 * 60));
 }

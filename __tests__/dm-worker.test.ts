@@ -99,7 +99,7 @@ vi.mock("@/lib/instagram-accounts", () => ({
 // The real after() needs a request scope; collect its tasks to run once the response is out.
 vi.mock("next/server", async (importOriginal) => ({
   ...(await importOriginal<typeof import("next/server")>()),
-  after: (task: unknown) => afterTasks.push(typeof task === "function" ? task() : task),
+  after: (task: () => unknown) => afterTasks.push(task()),
 }));
 
 vi.mock("@/lib/meta/client", () => ({
