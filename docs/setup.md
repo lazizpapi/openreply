@@ -103,10 +103,11 @@ Copy `.env.example` to `.env` for local work, or set these in Vercel and Railway
 | `ENCRYPTION_KEY` | 32-byte hex. `openssl rand -hex 32`. Encrypts provider credentials and Instagram tokens. Identical across web and worker. |
 | `DATABASE_URL` | PostgreSQL connection string. Public Railway URL on Vercel; internal on the worker. |
 | `REDIS_URL` | Redis connection string. Must support blocking commands, so an HTTP-only Redis will not work with BullMQ. |
-| `RESEND_API_KEY` | Resend key. Login is email magic links only, so without this nobody can sign in. |
-| `EMAIL_FROM` | A sender on a domain you verified in Resend. The placeholder will not deliver. |
+| `RESEND_API_KEY` | Resend key. Login is email magic links only, so without this nobody can sign in. Also set it on the worker, which emails the owner when the AI assistant hands over. |
+| `EMAIL_FROM` | A sender on a domain you verified in Resend. The placeholder will not deliver. Set it on the worker too, for the handover email. |
 | `ALLOWED_EMAILS` | Optional. Comma-separated allowlist of addresses that may sign in, case insensitive. Unset, anyone who reaches your public URL can request a magic link and gets their own workspace, which is worth closing on an instance you run for yourself. |
-| `EMAIL_SERVER` | Optional. An SMTP URL, for example `smtps://login%40example.com:password@mail.example.com:465`. Set it to send magic links through your own mail server instead of Resend; then `RESEND_API_KEY` is not needed. URL-encode special characters in the user and password (`@` becomes `%40`). Port 465 with `smtps://` is implicit TLS, port 587 with `smtp://` is STARTTLS. |
+| `EMAIL_SERVER` | Optional. An SMTP URL, for example `smtps://login%40example.com:password@mail.example.com:465`. Set it to send magic links through your own mail server instead of Resend; then `RESEND_API_KEY` is not needed. URL-encode special characters in the user and password (`@` becomes `%40`). Port 465 with `smtps://` is implicit TLS, port 587 with `smtp://` is STARTTLS. The worker uses it for the handover email too. |
+| `ANTHROPIC_API_KEY` | Optional. Claude API key for the AI assistant, which answers DMs that match no campaign. Set it on the worker, which sends the answers, and on the web app, for the Settings "Try it" box. Without it the assistant stays off. |
 
 **Direct Meta only.** Leave these unset if all accounts use Zernio:
 
@@ -117,6 +118,8 @@ Copy `.env.example` to `.env` for local work, or set these in Vercel and Railway
 | `INSTAGRAM_APP_SECRET` | From the Meta app. |
 | `FACEBOOK_APP_SECRET` | From the Meta app. |
 | `WEBHOOK_VERIFY_TOKEN` | Any random string. You paste the same value into Meta's webhook config. |
+| `META_LOGIN_CONFIG_ID` | Optional. The login configuration ID (Facebook Login for Business, Configurations) for Unified login, which Meta apps created from October 2026 offer instead of Instagram Login. Then `INSTAGRAM_APP_ID` and `INSTAGRAM_APP_SECRET` hold the Meta app's own ID and secret. Set it on web and worker: both pick the Graph host from it. Unset keeps Instagram Login. |
+| `META_INSTAGRAM_ACCOUNT_IDS` | Optional, with Unified login. Comma-separated Instagram account IDs to connect when Meta hides the account from the login. Web app only. |
 
 `ENCRYPTION_KEY` must be exactly 64 hex characters or the app throws on boot.
 

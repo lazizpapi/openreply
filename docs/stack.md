@@ -13,7 +13,8 @@ For the step-by-step setup, see [setup.md](setup.md).
 | ORM / DB | Prisma 7 with the `@prisma/adapter-pg` driver, PostgreSQL |
 | Queue | BullMQ 5 on Redis, via `ioredis` |
 | Auth | Auth.js / NextAuth 5 (email magic links) |
-| Email | Resend (login links) |
+| Email | Resend (login links, and handover emails to the owner) |
+| AI | Anthropic SDK, Claude Haiku 5.5 (the DM assistant) |
 | Validation | Zod 4 |
 | Charts | Recharts 3 |
 | Styling | Tailwind CSS 4 |
@@ -59,4 +60,5 @@ in the repo. Full descriptions are in [setup.md](setup.md#environment-variables)
 `NEXTAUTH_URL`, `NEXTAUTH_SECRET`, `CRON_SECRET`, `ENCRYPTION_KEY`, `DATABASE_URL`,
 `REDIS_URL`, `RESEND_API_KEY`, `EMAIL_FROM`, `META_GRAPH_API_VERSION`,
 `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, `FACEBOOK_APP_SECRET`,
-`WEBHOOK_VERIFY_TOKEN`.
+`WEBHOOK_VERIFY_TOKEN`, `META_LOGIN_CONFIG_ID`, `META_INSTAGRAM_ACCOUNT_IDS`,
+`ANTHROPIC_API_KEY`.
