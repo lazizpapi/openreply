@@ -2255,7 +2255,7 @@ describe("DM Worker — AI assistant", () => {
     expect(aiRows).toHaveLength(0);
   });
 
-  it("lets a nudge answer a yes-word instead of the AI", async () => {
+  function withPendingButton() {
     const redis = createFakeRedis();
     vi.stubEnv("REDIS_URL", "redis://fake");
     vi.mocked(getRedisConnection).mockReturnValue(redis as never);
@@ -2270,6 +2270,11 @@ describe("DM Worker — AI assistant", () => {
       expiresAt: Date.now() + 60_000,
     });
     mockPrisma.automation.findFirst.mockResolvedValue(campaign);
+    return redis;
+  }
+
+  it("lets a nudge answer a yes-word instead of the AI", async () => {
+    withPendingButton();
 
     await getProcessor()(dm("ha", "mid_1"));
     await runAiReplies();
@@ -2279,7 +2284,23 @@ describe("DM Worker — AI assistant", () => {
     expect(mockSendDirectMessage).not.toHaveBeenCalled();
   });
 
+  it("stays silent on a yes-word whose nudge is held back by the once-a-minute limit", async () => {
+    withPendingButton();
+
+    await getProcessor()(dm("ha", "mid_1"));
+    await getProcessor()(dm("ha", "mid_2"));
+    await runAiReplies();
+
+    expect(mockSendDirectMessageWithButton).toHaveBeenCalledTimes(1);
+    expect(aiRows).toHaveLength(0);
+    expect(mockAskClaude).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
   it("answers a yes-word when there is no pending button", async () => {
+    vi.stubEnv("REDIS_URL", "redis://fake");
+    vi.mocked(getRedisConnection).mockReturnValue(createFakeRedis() as never);
+
     await getProcessor()(dm("ha", "mid_1"));
     await runAiReplies();
 

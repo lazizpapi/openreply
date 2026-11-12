@@ -11,7 +11,8 @@ import type { ProcessMessageJob } from "./client";
 /**
  * Nudge: a follower who types a yes-word instead of tapping gets their pending
  * button again, the owner's message and button unchanged. META accounts only.
- * Never throws; returns whether a nudge was sent.
+ * Never throws; returns whether the message was handled: a nudge was sent, or
+ * one was held back by the once-a-minute limit.
  */
 export async function sendNudge(job: ProcessMessageJob): Promise<boolean> {
   const { instagramAccountId, senderId, messageText, accountConnectionId } = job;
@@ -38,7 +39,8 @@ export async function sendNudge(job: ProcessMessageJob): Promise<boolean> {
 
     const context = await createInstagramContext(campaign.instagramAccount);
     if (context.provider !== "META") return false;
-    if (!(await claimNudge(instagramAccountId, senderId))) return false;
+    // A repeated "ha" while a button is pending is not a question for the AI.
+    if (!(await claimNudge(instagramAccountId, senderId))) return true;
 
     // The follower just wrote, so the messaging window is open.
     await sendDirectMessageWithButton({
