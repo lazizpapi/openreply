@@ -36,7 +36,7 @@ Implementation notes and deviations (agent, ticket 06):
 **Redis keys added**
 
 - `ai_pause:<instagramId>:<followerId>` = `1`, 12 h TTL. Set by the `ai-echo` job and by the inbox reply route.
-- `bot_sent_text:<instagramId>:<followerId>:<sha256 of the text, trimmed, whitespace collapsed>` = `1`, 24 h. `recordBotSend(instagramAccountId, recipientId, text, messageId?)` writes it beside ticket 04's `bot_sent:<id>` on every tracked send, so each part of a split AI answer gets its own key.
+- `bot_sent_text:<instagramId>:<followerId>:<sha256 of the text, trimmed, whitespace collapsed>` = `1`, 24 h. Every tracked send writes it, so each part of a split AI answer gets its own key. Since the review fix below, `recordBotText` writes it before the send attempt and `recordBotSend` writes ticket 04's `bot_sent:<id>` after success.
 - `isBotSend(instagramAccountId, followerId, messageId, text?)` checks `bot_sent:<mid>` first, then the text key.
 
 **Where things live**
@@ -59,3 +59,8 @@ Implementation notes and deviations (agent, ticket 06):
   - whether the echo `mid` equals the send API's `message_id` (the text match now covers text sends if it doesn't)
   - whether a private reply's echo names the same follower ID as the comment's `from.id`, which both records are keyed by
   - `is_business_follow_user` under a Unified-login SYSTEM_USER token
+
+Review fix (agent, after ticket 07):
+
+- **The text record is written before the send.** Meta sometimes answers a send with an error (code 1, see `isDeliveryUnconfirmed`) after delivering it. The `bot_sent_text:` key was written only after a successful send, so that echo looked human and paused the AI for 12 hours. `track()` in `lib/instagram/send-messages.ts` now calls `recordBotText` before each attempt on META accounts, and `recordBotSend` (the `bot_sent:<id>` key) after success. Both stay fire-and-forget. A send that really failed leaves a harmless text key. Test: "does not count the echo of a send that errored but was delivered as the owner replying".
+- **Inbox reply** now calls `after(() => pauseAi(...))`, the callback form in Next's docs. The test's `after()` stub accepts only a callback.

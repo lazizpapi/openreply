@@ -42,8 +42,12 @@ Implementation notes and deviations (agent, ticket 04):
 - **Campaign ID** in the pending button is read from the payload (`reveal:<id>…` / `followcheck:<id>…`), so callers' signatures only gain `recipientId` on the three private-reply sends.
 - **Link-button clearing** covers both link-button sends: the DM and the private reply. A private reply lands in the follower's DMs too, and user story 18 says no nudges after the lead magnet.
 - **Read fallback does not clear.** The opening-DM read fallback is enqueued as a postback job (`fallback: true`) but is no tap. Clearing on it would drop the pending button of exactly the follower who read it and might type "ha" instead. Real taps and follow re-checks clear.
-- **Latin `da`/`daaa` counts as a yes-word** as well as Cyrillic `да`, because the spec's own example `daaa` is Latin. Cyrillic `ха` (Russian-keyboard "ha") is not in the list and does not count.
+- **Latin `da`/`daaa` counts as a yes-word** as well as Cyrillic `да`, because the spec's own example `daaa` is Latin. Cyrillic `ха` and `ок` (typed on a Russian keyboard layout) count too, since commit caa8113.
 - **Extra guard:** no nudge when the pending button's campaign is no longer live (or belongs to another account), since tapping that button would do nothing. This uses the stored campaign ID.
 - **Nudge failures are silent:** a failed lookup or send is logged and the job ends normally (no BullMQ retry 5 minutes later). The nudge spends no workspace DM quota, like the follow-prompt resend after a tap.
-- **Hook point:** `processMessage` ends with `if (campaignMatched) return; if (await sendNudge(job.data)) return;` followed by the AI-assistant hook comment. A yes-word that is throttled or has no pending button reaches the hook.
+- **Hook point:** `processMessage` ends with `if (campaignMatched) return; if (await sendNudge(job.data)) return;` followed by the AI-assistant hook comment. A yes-word with no pending button reaches the hook (a throttled one no longer does, see the review fix below).
 - Not handled: a lead magnet delivered as plain text (campaign without tracked links, or the inline-link fallback after a template rejection) does not clear the pending button. A tap still clears it.
+
+Review fix (agent, after ticket 07):
+
+- **A throttled yes-word ends silently.** When the follower has a pending button but the 60-second `nudge:` claim fails, `sendNudge` now returns `true`, so the message never reaches the AI assistant. A yes-word with no pending button still goes to the AI. Tests: the "AI assistant" block in `__tests__/dm-worker.test.ts`.

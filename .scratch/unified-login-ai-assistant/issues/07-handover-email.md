@@ -57,9 +57,10 @@ Why: each is the spec's "I'll answer this myself soon". They are written in the 
 - **What counts as a link:**
   - an email address
   - anything starting with `http://`, `https://` or `www.`
-  - a bare domain such as `t.me/x` or `site.uz` (its last part must be ASCII letters)
+  - a bare domain with a path, such as `t.me/x`
+  - a bare domain ending in a common TLD, such as `site.uz` (uz, com, ru, me, ai, io, org, net, app, dev, co, link, ly, gg, tv, info, site, online, store, shop, xyz, pro, ua, kz)
 
-  Trailing punctuation is trimmed first. "Verbatim" means a case-sensitive substring of the AI instructions, so `t.me/lazizpapi` passes when the instructions contain `https://t.me/lazizpapi`. The cost: words joined by a dot with no space (`Node.js`, `Rahmat.Keyingi`) count as domains and cause a handover unless the instructions contain them.
+  Trailing punctuation is trimmed first. "Verbatim" means a case-sensitive substring of the AI instructions, so `t.me/lazizpapi` passes when the instructions contain `https://t.me/lazizpapi`. Since the review fix below, other words joined by a dot (`Node.js`, `Rahmat.Keyingi`) no longer count as domains.
 - **Order:**
   1. the handover text goes out through the tracked DM send (split like any answer)
   2. it is stored as the ASSISTANT message
@@ -99,3 +100,8 @@ Why: each is the spec's "I'll answer this myself soon". They are written in the 
 
 - a real Resend or SMTP send, and how the email looks in an inbox
 - the worker entry itself (its modules were loaded under `tsx` with a placeholder `DATABASE_URL`)
+
+Review fixes (agent, after ticket 07):
+
+- **Link guard: dotted words pass.** Any bare `word.word` used to count as a domain, so "Next.js" or "Rahmat.Keyingi" caused a handover. Now a bare domain counts only with a `/` or a TLD from the list above. Emails and `http://`, `https://`, `www.` links count as before. Cost: a bare domain on a TLD outside the list (`site.de`) passes the guard. Tests: the `hasOnlyKnownLinks` cases in `__tests__/ai-reply-text.test.ts`.
+- **Emoji-only DMs get no AI answer.** `handleAiMessage` skips a message with no letter or digit (`/[\p{L}\p{N}]/u`), such as "🔥", "❤️❤️" or "👍🏽": nothing is stored and no `ai-reply` job is queued. "salom 🔥" is answered as usual. Tests: the "AI assistant" block in `__tests__/dm-worker.test.ts`.
