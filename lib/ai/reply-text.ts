@@ -38,9 +38,16 @@ export function stripMarkdown(text: string): string {
 }
 
 // Anything Instagram may show as a link: an email, a URL with a scheme or
-// "www.", or a bare domain (ASCII letters only in its last part).
-const LINK =
-  /[\w.+-]+@[\w-]+(?:\.[\w-]+)+|\b(?:https?:\/\/|www\.)\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\b(?:\/\S*)?/gi;
+// "www.", a bare domain with a path ("t.me/x"), or a bare domain ending in a
+// common TLD ("site.uz"). Other dotted words ("Next.js", "Rahmat.Keyingi") pass.
+const TLDS =
+  "uz|com|ru|me|ai|io|org|net|app|dev|co|link|ly|gg|tv|info|site|online|store|shop|xyz|pro|ua|kz";
+const DOMAIN = String.raw`\b[a-z0-9-]+(?:\.[a-z0-9-]+)*`;
+const LINK = new RegExp(
+  String.raw`[\w.+-]+@[\w-]+(?:\.[\w-]+)+|\b(?:https?:\/\/|www\.)\S+|` +
+    String.raw`${DOMAIN}\.[a-z]{2,}\/\S*|${DOMAIN}\.(?:${TLDS})\b`,
+  "gi"
+);
 const TRAILING_PUNCTUATION = /[.,:;!?)\]}"'»…]+$/;
 
 /** The link guard: every link in a reply must appear verbatim in the AI instructions. */

@@ -124,6 +124,8 @@ describe("hasOnlyKnownLinks", () => {
     "Yozing: info@lazizpapi.uz",
     "Narxi 200.000 soʻm, 3.5 soat.",
     "Instagram: @lazizbek_papi_uz",
+    "Kursda Next.js va Node.js oʻrganamiz.",
+    "Rahmat.Keyingi savolingiz?",
   ])("passes %j", (reply) => {
     expect(hasOnlyKnownLinks(reply, instructions)).toBe(true);
   });
@@ -137,6 +139,10 @@ describe("hasOnlyKnownLinks", () => {
     "Botga yozing: t.me/lazizpapi_bot",
     "Yozing: sales@lazizpapi.uz",
     "Saytimiz: openreply.app",
+    "Sayt: site.uz",
+    "Yozing: t.me/x",
+    "Men claude.ai bilan ishlayman.",
+    "Havola: bit.ly/abc",
   ])("refuses %j", (reply) => {
     expect(hasOnlyKnownLinks(reply, instructions)).toBe(false);
   });
