@@ -69,10 +69,11 @@ export function liveDmCampaigns(instagramAccountId: string) {
 
 /**
  * Entry point, called by the message job when no campaign matched and no nudge
- * was sent. Stores the DM and queues the answer for 10 seconds later.
+ * was sent. Stores the DM and queues the answer for 10 seconds later. A DM with
+ * no letters or digits (only emoji) gets no answer.
  */
 export async function handleAiMessage(job: ProcessMessageJob, receivedAt: Date): Promise<void> {
-  if (!isAiConfigured()) return;
+  if (!isAiConfigured() || !/[\p{L}\p{N}]/u.test(job.messageText)) return;
   try {
     const account = await loadAccount(job.instagramAccountId);
     if (account?.provider !== "META" || !account.aiSettings?.enabled) return;

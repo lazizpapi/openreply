@@ -2308,6 +2308,23 @@ describe("DM Worker — AI assistant", () => {
     expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["🔥", "❤️❤️", "👍🏽", " 😂 🙏 "])("ignores the emoji-only message %j", async (text) => {
+    await getProcessor()(dm(text, "mid_1"));
+    await runAiReplies();
+
+    expect(aiRows).toHaveLength(0);
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+    expect(mockAskClaude).not.toHaveBeenCalled();
+  });
+
+  it("answers a message with words and an emoji", async () => {
+    await getProcessor()(dm("salom 🔥", "mid_1"));
+    await runAiReplies();
+
+    expect(mockAskClaude.mock.calls[0][1]).toEqual([{ role: "user", content: "salom 🔥" }]);
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("does nothing AI-related without ANTHROPIC_API_KEY", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "");
 
