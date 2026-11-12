@@ -2,7 +2,7 @@
  * Redis records of what the bot sent, shared by the nudge and human takeover,
  * plus the AI pause that human takeover sets.
  * All best-effort: skipped without REDIS_URL (tests), and a write never delays
- * or fails the send it follows.
+ * or fails the send it goes with.
  */
 import { createHash } from "node:crypto";
 import type Redis from "ioredis";
@@ -49,21 +49,21 @@ const textKey = (instagramAccountId: string, followerId: string, text: string) =
     .update(text.trim().replace(/\s+/g, " "))
     .digest("hex")}`;
 
-// Marks a message as sent by the bot, so its echo is not mistaken for the owner
-// replying. Without a Meta message id, a hash of follower, text and minute stands in.
-export function recordBotSend(
-  instagramAccountId: string,
-  recipientId: string,
-  text: string,
-  messageId?: string
-) {
+// Written before each send attempt: Meta sometimes errors on a send it still
+// delivered, and that echo must not look like the owner replying.
+export function recordBotText(instagramAccountId: string, recipientId: string, text: string) {
+  write((client) => client.set(textKey(instagramAccountId, recipientId, text), "1", "EX", DAY_SECONDS));
+}
+
+// Marks a successful send's id as the bot's, so its echo is not mistaken for the
+// owner replying. Without a Meta message id, a hash of follower, text and minute stands in.
+export function recordBotSend(recipientId: string, text: string, messageId?: string) {
   const id =
     messageId ||
     `h:${createHash("sha256")
       .update(JSON.stringify([recipientId, text, Math.floor(Date.now() / 60_000)]))
       .digest("hex")}`;
   write((client) => client.set(`bot_sent:${id}`, "1", "EX", DAY_SECONDS));
-  write((client) => client.set(textKey(instagramAccountId, recipientId, text), "1", "EX", DAY_SECONDS));
 }
 
 export function recordPendingButton(

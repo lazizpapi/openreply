@@ -9,6 +9,7 @@ import type { InstagramContext, ZernioContext } from "./context";
 import {
   clearPendingButton,
   recordBotSend,
+  recordBotText,
   recordPendingButton,
   type PendingButton,
 } from "./bot-sends";
@@ -279,20 +280,24 @@ export async function sendCommentReply({
 
 // ─── Bot-send tracking ──────────────────────────────────────────────────────
 // The exported DM sends wrap the untracked ones above. On META accounts every
-// successful send is recorded as bot-sent, a postback-button send records the
-// follower's pending button, and a link-button send (the lead magnet) clears it.
+// send attempt records its text as bot-sent and every successful send its id, a
+// postback-button send records the follower's pending button, and a link-button
+// send (the lead magnet) clears it.
 
 type SendArgs<F extends (args: never) => unknown> = Parameters<F>[0];
 
-function track(
+async function track<R extends { message_id?: string }>(
   { context, instagramAccountId }: { context: InstagramContext; instagramAccountId: string },
   recipientId: string,
   text: string,
-  result: { message_id?: string },
+  send: () => Promise<R>,
   pending?: Omit<PendingButton, "campaignId" | "text"> | "clear"
-) {
-  if (context.provider !== "META") return;
-  recordBotSend(instagramAccountId, recipientId, text, result.message_id);
+): Promise<R> {
+  const isMeta = context.provider === "META";
+  if (isMeta) recordBotText(instagramAccountId, recipientId, text);
+  const result = await send();
+  if (!isMeta) return result;
+  recordBotSend(recipientId, text, result.message_id);
   if (pending === "clear") clearPendingButton(instagramAccountId, recipientId);
   // Campaign payloads are `reveal:<id>[:open]` or `followcheck:<id>[:open]`.
   else if (pending)
@@ -301,58 +306,53 @@ function track(
       text,
       ...pending,
     });
-}
-
-export async function sendPrivateReply(
-  args: SendArgs<typeof sendPrivateReplyUntracked> & { recipientId: string }
-) {
-  const result = await sendPrivateReplyUntracked(args);
-  track(args, args.recipientId, args.message, result);
   return result;
 }
 
-export async function sendPrivateReplyWithButton(
+export function sendPrivateReply(
+  args: SendArgs<typeof sendPrivateReplyUntracked> & { recipientId: string }
+) {
+  return track(args, args.recipientId, args.message, () => sendPrivateReplyUntracked(args));
+}
+
+export function sendPrivateReplyWithButton(
   args: SendArgs<typeof sendPrivateReplyWithButtonUntracked> & { recipientId: string }
 ) {
-  const result = await sendPrivateReplyWithButtonUntracked(args);
-  track(args, args.recipientId, args.text, result, {
+  return track(args, args.recipientId, args.text, () => sendPrivateReplyWithButtonUntracked(args), {
     buttonTitle: args.buttonTitle,
     payload: args.payload,
     via: "private_reply",
   });
-  return result;
 }
 
-export async function sendPrivateReplyWithLinkButton(
+export function sendPrivateReplyWithLinkButton(
   args: SendArgs<typeof sendPrivateReplyWithLinkButtonUntracked> & { recipientId: string }
 ) {
-  const result = await sendPrivateReplyWithLinkButtonUntracked(args);
-  track(args, args.recipientId, args.text, result, "clear");
-  return result;
+  return track(
+    args,
+    args.recipientId,
+    args.text,
+    () => sendPrivateReplyWithLinkButtonUntracked(args),
+    "clear"
+  );
 }
 
-export async function sendDirectMessage(args: SendArgs<typeof sendDirectMessageUntracked>) {
-  const result = await sendDirectMessageUntracked(args);
-  track(args, args.userId, args.message, result);
-  return result;
+export function sendDirectMessage(args: SendArgs<typeof sendDirectMessageUntracked>) {
+  return track(args, args.userId, args.message, () => sendDirectMessageUntracked(args));
 }
 
-export async function sendDirectMessageWithButton(
+export function sendDirectMessageWithButton(
   args: SendArgs<typeof sendDirectMessageWithButtonUntracked>
 ) {
-  const result = await sendDirectMessageWithButtonUntracked(args);
-  track(args, args.userId, args.text, result, {
+  return track(args, args.userId, args.text, () => sendDirectMessageWithButtonUntracked(args), {
     buttonTitle: args.buttonTitle,
     payload: args.payload,
     via: "dm",
   });
-  return result;
 }
 
-export async function sendDirectMessageWithLinkButton(
+export function sendDirectMessageWithLinkButton(
   args: SendArgs<typeof sendDirectMessageWithLinkButtonUntracked>
 ) {
-  const result = await sendDirectMessageWithLinkButtonUntracked(args);
-  track(args, args.userId, args.text, result, "clear");
-  return result;
+  return track(args, args.userId, args.text, () => sendDirectMessageWithLinkButtonUntracked(args), "clear");
 }

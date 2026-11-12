@@ -2627,6 +2627,20 @@ describe("DM Worker — AI assistant", () => {
       expect(mockSendDirectMessage).toHaveBeenCalledTimes(4);
     });
 
+    // Meta's code 1 error can come back on a send that was delivered.
+    it("does not count the echo of a send that errored but was delivered as the owner replying", async () => {
+      mockSendDirectMessage.mockRejectedValueOnce(
+        new MetaApiError(1, undefined, undefined, "An unknown error has occurred.")
+      );
+
+      await followerWrites("salom", "mid_1");
+      const [sent] = sentTexts();
+      await getProcessor()(echo("mid_unknown", false, sent));
+      await followerWrites("rahmat", "mid_2");
+
+      expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
+    });
+
     it("counts an echo with an unknown id and new text as the owner replying", async () => {
       await followerWrites("salom", "mid_1");
       await getProcessor()(echo("mid_unknown", false, "Salom! Men o'zim javob beraman."));
