@@ -623,7 +623,9 @@ export async function getConversations(
     return handleResponse<Page>(
       await fetch(url.toString(), {
         headers: { Authorization: `Bearer ${accessToken}` },
-        signal: AbortSignal.timeout(10_000),
+        // Meta often takes over 10 s for 50 threads with the last-message
+        // expansion. The inbox skips polls while one is in flight.
+        signal: AbortSignal.timeout(25_000),
       })
     );
   }

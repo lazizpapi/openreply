@@ -50,12 +50,11 @@ Do Railway first, because Vercel needs the database URLs from it.
 2. In the project, click New, then Database, then Add PostgreSQL.
 3. Click New, then Database, then Add Redis.
 4. Add the worker: click New, then GitHub Repo, and select your fork of this repo. Railway detects the Node app.
-5. Open the worker service's Settings and set the Build Command and Start Command:
+5. Open the worker service's Settings, find Deploy, and set the Custom Start Command:
    ```
-   Build Command:  npm run db:generate
-   Start Command:  npm run worker
+   npm run worker
    ```
-   The worker only needs the generated Prisma client, not `next build`. Do not leave the build as the default `npm run build`: it runs `next build` needlessly, and any build step that reaches the database (like `prisma migrate deploy`) fails here, because the worker cannot connect to Postgres at build time. Migrations are applied by the web app's `vercel-build` (Step 3) and by the manual `db:migrate` below, never by the worker.
+   Railway builds the service from the repo's `Dockerfile` automatically, so there is no build command to set. The image's default command starts the web app (`npm run start`), which is why the start command must be overridden. Without it the service shows Online but sends nothing, and `/api/health` reports the worker as unhealthy. Railway no longer reads config files such as `railway.json` for new services, so set this in the dashboard. Migrations are applied by the web app's `vercel-build` (Step 3) and by the manual `db:migrate` below, never by the worker.
 6. Open the worker service's Variables and add the shared environment variables and any variables required by your chosen provider from the [table below](#environment-variables). For the worker, use Railway's internal database and Redis hostnames (they look like `postgres.railway.internal` and `redis.railway.internal`); inside Railway's network they are faster and free of egress. `NEXTAUTH_URL` is your Vercel domain. `ENCRYPTION_KEY` must be the exact same value you will use on Vercel.
 
 Getting the connection URLs. Open the Postgres service, then its Variables or Connect tab. You will see two URLs:
