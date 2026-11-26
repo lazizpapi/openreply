@@ -18,7 +18,9 @@ import { readCache, writeCache } from "@/lib/client-cache";
 import type { ConversationListItem } from "@/app/api/instagram/conversations/route";
 import type { ThreadMessage } from "@/app/api/instagram/conversations/[id]/route";
 
-const POLL_MS = 12_000;
+// Every poll is a Graph API call that counts against the app's hourly limit,
+// which campaign sends share. Poll slowly, and never from a hidden tab.
+const POLL_MS = 60_000;
 // Cached list/threads are shown instantly on revisit, then revalidated in the
 // background. The Instagram Conversations API is slow (often several seconds),
 // so this is what makes the inbox feel fast after the first load.
@@ -141,7 +143,9 @@ export default function InboxPage() {
       setConvLoading(true);
     }
     void loadConversations(Boolean(cached.data));
-    const timer = window.setInterval(() => void loadConversations(true), POLL_MS);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void loadConversations(true);
+    }, POLL_MS);
     return () => window.clearInterval(timer);
   }, [selectedAccountId, loadConversations]);
 
@@ -186,10 +190,9 @@ export default function InboxPage() {
       setThreadLoading(true);
     }
     void loadMessages(activeId, Boolean(cached.data));
-    const timer = window.setInterval(
-      () => void loadMessages(activeId, true),
-      POLL_MS
-    );
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void loadMessages(activeId, true);
+    }, POLL_MS);
     return () => window.clearInterval(timer);
   }, [activeId, active?.detailsUnavailable, loadMessages]);
 
