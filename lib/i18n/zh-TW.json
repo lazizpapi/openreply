@@ -468,5 +468,8 @@
   "{name} Campaign Report": "{name} 活動報表",
   "{type} post": "{type} 貼文",
   "”": "」",
-  "← Campaigns": "← 返回活動列表"
+  "← Campaigns": "← 返回活動列表",
+  "Instagram only lets apps reply within 24 hours of the person's last message. Reply in the Instagram app instead.": "Instagram 只允許應用程式在對方最後一則訊息後的 24 小時內回覆。請改用 Instagram App 回覆。",
+  "This person last wrote more than 24 hours ago. Instagram only lets apps reply within 24 hours of the person's last message, so reply in the Instagram app or wait until they write again.": "對方最後一次傳訊息已超過 24 小時。Instagram 只允許應用程式在對方最後一則訊息後的 24 小時內回覆，請改用 Instagram App 回覆，或等對方再次傳訊息。",
+  "Open in Instagram": "在 Instagram 開啟"
 }

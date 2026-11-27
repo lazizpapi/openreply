@@ -468,5 +468,8 @@
   "{name} Campaign Report": "Relatório da campanha {name}",
   "{type} post": "Publicação {type}",
   "”": "”",
-  "← Campaigns": "← Campanhas"
+  "← Campaigns": "← Campanhas",
+  "Instagram only lets apps reply within 24 hours of the person's last message. Reply in the Instagram app instead.": "O Instagram só permite que apps respondam até 24 horas após a última mensagem da pessoa. Responda pelo app do Instagram.",
+  "This person last wrote more than 24 hours ago. Instagram only lets apps reply within 24 hours of the person's last message, so reply in the Instagram app or wait until they write again.": "Essa pessoa escreveu pela última vez há mais de 24 horas. O Instagram só permite que apps respondam até 24 horas após a última mensagem da pessoa, então responda pelo app do Instagram ou espere ela escrever de novo.",
+  "Open in Instagram": "Abrir no Instagram"
 }

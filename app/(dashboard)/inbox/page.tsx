@@ -6,8 +6,8 @@
  * Instagram DM conversations for the selected account, with live message
  * history and a reply composer. Messages are read from the Conversations API
  * (Meta only exposes the 20 most recent per thread) and refreshed by polling.
- * Sending is subject to Instagram's 24-hour messaging window — Meta's error is
- * surfaced verbatim when it applies.
+ * Sending is subject to Instagram's 24-hour messaging window: the composer is
+ * disabled with an explanation once the follower's last message is too old.
  */
 
 import type { Locale } from "@/lib/i18n";
@@ -17,6 +17,10 @@ import AccountSelect, { type AccountOption } from "@/components/account-select";
 import { readCache, writeCache } from "@/lib/client-cache";
 import type { ConversationListItem } from "@/app/api/instagram/conversations/route";
 import type { ThreadMessage } from "@/app/api/instagram/conversations/[id]/route";
+import {
+  isMessagingWindowClosed,
+  MESSAGING_WINDOW_CLOSED,
+} from "@/lib/instagram/messaging-window";
 
 // Every poll is a Graph API call that counts against the app's hourly limit,
 // which campaign sends share. Poll slowly, and never from a hidden tab.
@@ -65,6 +69,9 @@ export default function InboxPage() {
   const conversationRequests = useRef(new Set<string>());
 
   const active = conversations.find((c) => c.id === activeId) ?? null;
+  // Checked before sending so the owner never types a reply Meta will refuse.
+  const windowClosed =
+    !!active && !active.detailsUnavailable && messages.length > 0 && isMessagingWindowClosed(messages);
 
   // Accounts for the selector; default to the first connected account. Uses the
   // lightweight accounts endpoint (one query) rather than the heavy dashboard
@@ -247,7 +254,11 @@ export default function InboxPage() {
         // Roll the optimistic message back and restore the draft so it's not lost.
         setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
         setDraft(text);
-        setSendError(data.error ?? t("Failed to send message"));
+        setSendError(
+          data.code === MESSAGING_WINDOW_CLOSED
+            ? t("Instagram only lets apps reply within 24 hours of the person's last message. Reply in the Instagram app instead.")
+            : data.error ?? t("Failed to send message")
+        );
       }
     } catch {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
@@ -395,12 +406,26 @@ export default function InboxPage() {
               </div>
 
               <div className="shrink-0 border-t border-border p-3">
-                {sendError && (
-                  <p className="mb-2 text-xs text-error">{sendError}</p>
+                {windowClosed ? (
+                  <p role="status" className="mb-2 text-xs text-muted">
+                    {t("This person last wrote more than 24 hours ago. Instagram only lets apps reply within 24 hours of the person's last message, so reply in the Instagram app or wait until they write again.")}{" "}
+                    {active.contact.username && (
+                      <a
+                        href={`https://ig.me/m/${encodeURIComponent(active.contact.username)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-medium text-accent hover:underline"
+                      >
+                        {t("Open in Instagram")}
+                      </a>
+                    )}
+                  </p>
+                ) : (
+                  sendError && <p className="mb-2 text-xs text-error">{sendError}</p>
                 )}
                 <div className="flex items-end gap-2">
                   <textarea
-                    disabled={active.detailsUnavailable || !active.contact.id}
+                    disabled={active.detailsUnavailable || !active.contact.id || windowClosed}
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={handleKeyDown}
@@ -411,7 +436,7 @@ export default function InboxPage() {
                   <button
                     type="button"
                     onClick={() => void handleSend()}
-                    disabled={sending || !draft.trim() || !active.contact.id || active.detailsUnavailable}
+                    disabled={sending || !draft.trim() || !active.contact.id || active.detailsUnavailable || windowClosed}
                     className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50"
                   >
                     {sending ? t("Sending…") : t("Send")}

@@ -8,6 +8,10 @@ import {
 } from "@/lib/instagram/provider";
 import { createInstagramContext } from "@/lib/instagram/provider";
 import { pauseAi } from "@/lib/instagram/bot-sends";
+import {
+  isWindowClosedError,
+  MESSAGING_WINDOW_CLOSED,
+} from "@/lib/instagram/messaging-window";
 
 export interface ConversationListItem {
   id: string;
@@ -156,9 +160,18 @@ export async function POST(request: NextRequest) {
     if (accessToken.provider === "META") after(() => pauseAi(account.instagramId, recipientId));
     return NextResponse.json({ success: true, data: result });
   } catch (err) {
+    if (err instanceof MetaApiError && isWindowClosedError(err)) {
+      return NextResponse.json(
+        {
+          success: false,
+          code: MESSAGING_WINDOW_CLOSED,
+          error:
+            "Instagram only lets apps reply within 24 hours of the person's last message. Reply in the Instagram app instead.",
+        },
+        { status: 409 }
+      );
+    }
     console.error("[Conversations] Send error:", err);
-    // Surface Meta's own message — the common case is the 24-hour messaging
-    // window having closed, which the user needs to see explicitly.
     const message =
       err instanceof MetaApiError ? err.message : "Failed to send message";
     return NextResponse.json(
